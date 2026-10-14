@@ -703,40 +703,12 @@ async fn make_answer(
         let hirms = format!("HIRMS::2:{segno}+0010::Depot abgerufen'", segno = segno);
         result.extend_from_slice(hirms.as_bytes());
 
-        if state.config.fixtures.holdings.is_empty() {
-            // No holdings — empty response
-            let hiwpd = format!("HIWPD::6:{segno}+DE89370400440532013000:GENODE23X42'", segno = segno);
-            result.extend_from_slice(hiwpd.as_bytes());
-        } else {
-            // Build HIWPD segment with holding positions as DEGs
-            // Format: HIWPD:<seg>:6:<ref>+<IBAN>:<BIC>[+<ISIN>:<WKN>:<name>:<qty>:<price>:<currency>:<date>:<market_value>]*'
-            // Use account from fixtures (first account IBAN:BIC)
-            let account_deg = {
-                let acc = state.config.fixtures.accounts.first();
-                match acc {
-                    Some(a) => format!("{}:{}", a.iban, a.bic),
-                    None => "DE89370400440532013000:GENODE23X42".to_string(),
-                }
-            };
-            let mut hiwpd = format!("HIWPD::6:{segno}+{account}", segno = segno, account = account_deg);
-            for h in &state.config.fixtures.holdings {
-                // Escape FinTS special chars in name (? for +, :, ', @, ?)
-                let safe_name = h.name
-                    .replace('?', "??")
-                    .replace('+', "?+")
-                    .replace(':', "?:")
-                    .replace('\'', "?'")
-                    .replace('@', "?@");
-                hiwpd.push_str(&format!(
-                    "+{}:{}:{}:{}:{}:{}:{}:{}",
-                    h.isin, h.wkn, safe_name,
-                    h.quantity, h.price, h.price_currency, h.price_date,
-                    h.market_value,
-                ));
-            }
-            hiwpd.push('\'');
-            result.extend_from_slice(hiwpd.as_bytes());
-        }
+        // Per WPDepotListRes the payload is one binary MT535 statement.
+        let mt535 = build_mt535(&state.config.fixtures.holdings, &state.config.fixtures.accounts);
+        let mut hiwpd = format!("HIWPD::6:{segno}+@{len}@", segno = segno, len = mt535.len()).into_bytes();
+        hiwpd.extend_from_slice(mt535.as_bytes());
+        hiwpd.push(b'\'');
+        result.extend_from_slice(&hiwpd);
     }
 
     // Handle HKTAN — TAN processing (just acknowledge)
@@ -750,6 +722,30 @@ async fn make_answer(
     }
 
     result
+}
+
+/// Build an MT535 statement of holdings for the mock depot.
+fn build_mt535(holdings: &[MockHolding], accounts: &[MockAccount]) -> String {
+    let depot = accounts
+        .first()
+        .map(|a| format!("{}/{}", a.blz, a.account_number))
+        .unwrap_or_else(|| "12345678/0532013000".to_string());
+    let mut s = format!(
+        ":16R:GENL\r\n:28E:1/ONLY\r\n:20C::SEME//NONREF\r\n:23G:NEWM\r\n\
+         :98A::STAT//20250115\r\n:22F::STTY//CUST\r\n:97A::SAFE//{}\r\n:17B::ACTI//{}\r\n:16S:GENL\r\n",
+        depot,
+        if holdings.is_empty() { "N" } else { "Y" },
+    );
+    for h in holdings {
+        s.push_str(&format!(
+            ":16R:FIN\r\n:35B:ISIN {}\r\n/DE/{}\r\n{}\r\n:90B::MRKT//ACTU/{}{}\r\n\
+             :98A::PRIC//{}\r\n:93B::AGGR//UNIT/{}\r\n:19A::HOLD//{}{}\r\n:16S:FIN\r\n",
+            h.isin, h.wkn, h.name, h.price_currency, h.price, h.price_date, h.quantity,
+            h.price_currency, h.market_value,
+        ));
+    }
+    s.push('-');
+    s
 }
 
 async fn handle_fints_request(

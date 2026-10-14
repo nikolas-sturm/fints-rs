@@ -403,54 +403,39 @@ pub(crate) fn extract_mt940_data(segments: &[RawSegment]) -> Mt940ExtractedData 
 
 /// Parse HIWPD (securities depot response) — extracts holdings.
 ///
-/// HIWPD response segment structure per FinTS spec:
-///   DEG0 = header (HIWPD:seg_num:version:ref)
-///   DEG1 = depot account (KTI or KTO)
-///   DEG2+ = securities positions
+/// Per WPDepotListRes (hbci-300.xml) HIWPD carries a single binary data
+/// element with an MT535 statement: `HIWPD:n:v:ref+@len@<MT535>`. Payloads
+/// of all HIWPD segments (touchdown pages) are concatenated and parsed as one
+/// statement stream.
 ///
-/// Each position DEG contains:
-///   - ISIN (International Securities Identification Number)
-///   - WKN (Wertpapierkennnummer)
-///   - Security name
-///   - Quantity (number of shares/units)
-///   - Price info (amount, currency, date)
-///   - Market value (total value of position)
-///   - Exchange info
-///
-/// The exact DEG layout varies by version and bank. We use a heuristic parser
-/// that handles the common structures from major German banks.
+/// Fallback: segments without binary data are scanned heuristically, one
+/// position per DEG (`ISIN:WKN:name:qty:price:cur:date`), which is the
+/// format the old mock server produced.
 pub(crate) fn parse_hiwpd(segments: &[RawSegment]) -> Vec<SecurityHolding> {
+    let mut mt535 = Vec::new();
     let mut holdings = Vec::new();
 
-    for seg in segments {
-        if seg.segment_type() != "HIWPD" {
-            continue;
-        }
-
-        // Skip header (DEG0) and account (DEG1), positions start at DEG2+
-        for i in 2..seg.deg_count() {
-            let d = seg.deg(i);
-            if d.len() < 3 {
-                continue;
+    for seg in segments.iter().filter(|s| s.segment_type() == "HIWPD") {
+        match read_binary(seg, 1, 0) {
+            Some(data) => {
+                if !mt535.is_empty() && !mt535.ends_with(b"\n") {
+                    mt535.extend_from_slice(b"\r\n");
+                }
+                mt535.extend_from_slice(&data);
             }
-
-            // Position DEG layout (common pattern for v1-v7):
-            // The structure varies, but typically:
-            //   [0] = piece marker or ISIN
-            //   [1] = ISIN or WKN
-            //   [2] = WKN or name
-            //   [3] = name or quantity
-            //   [4..] = quantity, price, currency, date, market_value, etc.
-            //
-            // We use heuristic detection: ISIN is 12 chars starting with 2 letters,
-            // WKN is 6 alphanumeric chars.
-            let holding = parse_holding_deg(d);
-            if let Some(h) = holding {
-                holdings.push(h);
+            None => {
+                for i in 2..seg.deg_count() {
+                    if let Some(h) = parse_holding_deg(seg.deg(i)) {
+                        holdings.push(h);
+                    }
+                }
             }
         }
     }
 
+    if !mt535.is_empty() {
+        holdings.extend(super::mt535::parse_mt535(&mt535));
+    }
     holdings
 }
 
@@ -1152,6 +1137,24 @@ mod tests {
         assert_eq!(holdings[0].isin.as_ref().unwrap().as_str(), "IE00B4L5Y983");
         // WKN is None because "ISHARES MSCI WORLD" is not 6 alnum chars
         assert!(holdings[0].wkn.is_none());
+    }
+
+    #[test]
+    fn test_parse_hiwpd_mt535_binary() {
+        let mt535 = ":16R:GENL\r\n:97A::SAFE//50010517/42\r\n:16S:GENL\r\n:16R:FIN\r\n:35B:ISIN DE0005140008\r\n/DE/514000\r\nDEUTSCHE BANK AG\r\n:90B::MRKT//ACTU/EUR42,5\r\n:93B::AGGR//UNIT/10,\r\n:19A::HOLD//EUR425,\r\n:16S:FIN\r\n-";
+        let raw = format!("HIWPD:5:6:3+@{}@{}'", mt535.len(), mt535);
+        let holdings = parse_hiwpd(&[parse_segment(&raw)]);
+        assert_eq!(holdings.len(), 1);
+        assert_eq!(holdings[0].name, "DEUTSCHE BANK AG");
+        assert_eq!(holdings[0].market_value, Some(rust_decimal::Decimal::from(425)));
+        assert_eq!(holdings[0].depot_id.as_deref(), Some("42"));
+    }
+
+    #[test]
+    fn test_parse_hiwpd_mt535_empty_statement() {
+        let mt535 = ":16R:GENL\r\n:97A::SAFE//50010517/42\r\n:17B::ACTI//N\r\n:16S:GENL\r\n-";
+        let raw = format!("HIWPD:5:6:3+@{}@{}'", mt535.len(), mt535);
+        assert!(parse_hiwpd(&[parse_segment(&raw)]).is_empty());
     }
 
     #[test]
