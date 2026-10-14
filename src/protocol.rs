@@ -692,8 +692,7 @@ impl<S: std::fmt::Debug> Dialog<S> {
         let preview: String = redacted.chars().take(500).collect();
         info!("[FinTS] Outgoing ({} bytes): {}", msg_bytes.len(), preview);
 
-        self.message_number += 1;
-        let response_bytes = self.connection.send(&msg_bytes).await?;
+        let response_bytes = self.exchange(&msg_bytes).await?;
         let response = parse_response(&response_bytes, self.message_number - 1)?;
         response.log_informational_codes();
         Ok(response)
@@ -707,8 +706,7 @@ impl<S: std::fmt::Debug> Dialog<S> {
             tan, &self.params.selected_security_function,
             segments, &self.params,
         )?;
-        self.message_number += 1;
-        let response_bytes = self.connection.send(&msg_bytes).await?;
+        let response_bytes = self.exchange(&msg_bytes).await?;
         let response = parse_response(&response_bytes, self.message_number - 1)?;
         response.log_informational_codes();
         Ok(response)
@@ -723,10 +721,21 @@ impl<S: std::fmt::Debug> Dialog<S> {
             &self.params.selected_security_function,
             &self.params,
         )?;
-        self.message_number += 1;
-        let _ = self.connection.send(&msg_bytes).await;
+        let _ = self.exchange(&msg_bytes).await;
         self.dialog_id = DialogId::unassigned();
         Ok(())
+    }
+
+    /// Send through the connection's quirk chain; bumps the message number.
+    async fn exchange(&mut self, msg_bytes: &[u8]) -> Result<Vec<u8>> {
+        let dialog_id = self.dialog_id.as_str().to_string();
+        let ctx = crate::quirks::QuirkContext {
+            hbci_version: "300",
+            dialog_id: &dialog_id,
+            message_number: self.message_number,
+        };
+        self.message_number += 1;
+        self.connection.exchange(msg_bytes, &ctx).await
     }
 
     fn extract_dialog_id(&mut self, response: &Response) {
@@ -768,6 +777,12 @@ impl Dialog<New> {
 
     pub fn with_params(mut self, params: &BankParams) -> Self {
         self.params = params.clone(); self
+    }
+
+    /// Use a custom quirk chain instead of hbci4java's default rewriters
+    /// (e.g. `QuirkChain::default().with(MyBankFix)`, or `QuirkChain::none()`).
+    pub fn with_quirks(mut self, quirks: crate::quirks::QuirkChain) -> Self {
+        self.connection.set_quirks(quirks); self
     }
 
     pub fn with_tan_medium(mut self, medium: &TanMediumName) -> Self {

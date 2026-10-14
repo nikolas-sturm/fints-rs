@@ -20,7 +20,8 @@ allow = [
     "Zlib",
     "Unicode-3.0",
     "CDLA-Permissive-2.0",
-    "MPL-2.0",
+    # This crate itself: parts ported from hbci4java (see NOTICE).
+    "LGPL-2.1-or-later",
 ]
 
 [bans]

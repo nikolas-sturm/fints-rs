@@ -50,6 +50,7 @@ pub mod audit;
 pub mod protocol;
 pub mod workflow;
 pub mod flow;
+pub mod quirks;
 pub mod session;
 
 // ═══════════════════════════════════════════════════════════════════════════════

@@ -3,7 +3,10 @@ name = "fints-rs"
 version = "0.2.0"
 edition = "2021"
 description = "Native Rust FinTS 3.0 PinTan client for German online banking"
-license = "MIT"
+# MIT for everything written from the FinTS spec or for this crate;
+# src/quirks/hbci4java.rs and tests/fixtures/hbci4java/ derive from hbci4java
+# and are LGPL-2.1-or-later. See NOTICE.
+license = "MIT AND LGPL-2.1-or-later"
 repository = "https://github.com/nikolas-sturm/fints-rs"
 keywords = ["fints", "hbci", "banking", "germany", "pintan"]
 categories = ["finance"]

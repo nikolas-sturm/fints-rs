@@ -842,6 +842,64 @@ mod tests {
         assert_eq!(names, [("942", "mobile TAN"), ("962", "Smart-TAN plus manuell"), ("972", "Smart-TAN plus optisch")]);
     }
 
+    /// Real-bank HITANS from hbci4java's test resources (LGPL, see NOTICE).
+    fn hbci4java_hitans() -> Vec<(String, RawSegment)> {
+        include_str!("../../tests/fixtures/hbci4java/hitans.tsv")
+            .lines()
+            .filter(|l| !l.starts_with('#') && !l.trim().is_empty())
+            .map(|l| {
+                let (src, seg) = l.split_once('\t').unwrap();
+                (src.to_string(), parse_segment(seg))
+            })
+            .collect()
+    }
+
+    #[test]
+    fn test_parse_hitans_hbci4java_fixtures_align() {
+        let fixtures = hbci4java_hitans();
+        assert!(fixtures.len() >= 10);
+        for (src, seg) in &fixtures {
+            let methods = parse_hitans(seg);
+            assert!(!methods.is_empty(), "{src} v{}: no methods", seg.segment_version());
+            for m in &methods {
+                // Misaligned groups show up as non-numeric security functions.
+                let sf = m.security_function.as_str();
+                assert!(sf.len() == 3 && sf.bytes().all(|b| b.is_ascii_digit()),
+                    "{src} v{}: bad security function {sf:?} ({})", seg.segment_version(), m.name);
+                assert!(!m.name.starts_with("TAN-"), "{src}: missing name for {sf}");
+                assert_eq!(m.is_decoupled, m.zka_name.as_deref().is_some_and(|z| z.starts_with("Decoupled")),
+                    "{src}: decoupled flag for {sf}");
+            }
+        }
+    }
+
+    #[test]
+    fn test_parse_hitans_hbci4java_decoupled_params() {
+        let all: Vec<TanMethod> = hbci4java_hitans().iter().flat_map(|(_, s)| parse_hitans(s)).collect();
+        let find = |sf: &str, v: u16| all.iter().find(|m| m.security_function.as_str() == sf && m.hktan_version == v).unwrap();
+
+        // DKB (bpd-ptsecmech-dkb.txt): "DKB App", decoupled, 999 polls, 1s/1s.
+        let dkb = find("940", 7);
+        assert_eq!(dkb.name, "DKB App");
+        assert!(dkb.is_decoupled);
+        assert_eq!((dkb.decoupled_max_polls, dkb.wait_before_first_poll, dkb.wait_before_next_poll), (999, 1, 1));
+
+        // Deutsche Bank (bpd-deutschebank.txt): photoTAN-Push, 60 polls, 5s/5s, auto polling allowed.
+        let db = find("903", 7);
+        assert_eq!(db.name, "photoTAN-Push");
+        assert_eq!((db.decoupled_max_polls, db.wait_before_first_poll, db.wait_before_next_poll), (60, 5, 5));
+        assert_eq!(db.decoupled_auto_polling, Some(true));
+
+        // Sparkasse-style pushTAN 2.0 (bpd-vop.txt): 180 polls, 1s/1s, TAN medium required.
+        let push = find("922", 7);
+        assert_eq!(push.name, "pushTAN 2.0");
+        assert!(push.needs_tan_medium);
+        assert_eq!((push.decoupled_max_polls, push.wait_before_first_poll, push.wait_before_next_poll), (180, 1, 1));
+
+        // Classic chipTAN in the same BPDs stays non-decoupled.
+        assert!(!find("910", 6).is_decoupled);
+    }
+
     #[test]
     fn test_parse_hitans_garbage_does_not_panic() {
         for raw in ["HITANS:1:7:4'", "HITANS:1:7:4+1+1+1+J'", "HITANS:1:99:4+1+1+1+J:N:0:900'", "HITANS:1:1:4+x'"] {

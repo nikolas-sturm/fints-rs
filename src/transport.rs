@@ -7,11 +7,13 @@ use base64::{engine::general_purpose::STANDARD as B64, Engine};
 use tracing::{debug, trace};
 
 use crate::error::{FinTSError, Result};
+use crate::quirks::{QuirkChain, QuirkContext};
 
 /// FinTS HTTP connection to a bank endpoint.
 pub struct FinTSConnection {
     url: String,
     client: reqwest::Client,
+    quirks: QuirkChain,
 }
 
 impl FinTSConnection {
@@ -28,10 +30,25 @@ impl FinTSConnection {
         Ok(Self {
             url: url.to_string(),
             client,
+            quirks: QuirkChain::default(),
         })
     }
 
-    /// Send a raw FinTS message (bytes) to the bank and return the raw response bytes.
+    /// Replace the quirk chain applied in [`FinTSConnection::exchange`].
+    pub fn set_quirks(&mut self, quirks: QuirkChain) {
+        self.quirks = quirks;
+    }
+
+    /// Send a message and return the response as clear text
+    /// (`HNHBK + inner segments + HNHBS`), with all quirks applied.
+    pub async fn exchange(&self, message_bytes: &[u8], ctx: &QuirkContext<'_>) -> Result<Vec<u8>> {
+        let outgoing = self.quirks.outgoing(message_bytes, ctx);
+        let raw = self.send(&outgoing).await?;
+        Ok(self.quirks.incoming(&raw, ctx))
+    }
+
+    /// Send a raw FinTS message (bytes) to the bank and return the raw response
+    /// bytes, without quirks or envelope handling.
     pub async fn send(&self, message_bytes: &[u8]) -> Result<Vec<u8>> {
         // Base64-encode the message
         let encoded = B64.encode(message_bytes);
