@@ -50,6 +50,7 @@ pub mod audit;
 pub mod protocol;
 pub mod workflow;
 pub mod flow;
+pub mod session;
 
 // ═══════════════════════════════════════════════════════════════════════════════
 // Re-exports
@@ -59,7 +60,8 @@ pub mod flow;
 pub use flow::{Flow, ChallengeInfo, SyncResult, FetchOptions};
 
 // Workflow layer
-pub use workflow::{BankOps, AnyBank, Dkb, GenericBank, bank_ops, bank_ops_with_config};
+pub use workflow::{BankOps, AnyBank, Dkb, Ing, GenericBank, bank_ops, bank_ops_with_config};
+pub use workflow::{initiate_default, fetch_default, fetch_transactions, fetch_holdings_default};
 pub use workflow::{InitiateOutcome, InitiateResult, InitiateNoTanResult, FetchResult, FetchOpts};
 
 // Protocol layer
@@ -67,6 +69,7 @@ pub use protocol::{
     Dialog, Response, TanChallenge, BankParams, Account,
     New, Synced, Open, TanPending,
     InitResult, SendResult, PollResult,
+    DecoupledEvent, DecoupledOptions, DecoupledParams,
     BalanceResult, TransactionResult, TransactionPage,
     HoldingsResult, HoldingsPage,
 };
@@ -81,6 +84,8 @@ pub use types::{
     BankName, FinTSUrl, ChallengeText, HhdUcData, Mt940Data,
 };
 pub use error::{FinTSError, Result};
+pub use session::SessionState;
+pub use tokio_util::sync::CancellationToken;
 pub use banks::{BankConfig, all_banks, bank_by_blz};
 
 // Debug / audit tooling

@@ -31,13 +31,14 @@ use fints::{
     debug::{decode_message, format_decoded, format_wire_log, VerbosityLevel},
     error::FinTSError,
     flow::{Flow, SyncResult},
-    protocol::{Dialog, PollResult},
+    protocol::Dialog,
     types::{
-        AccountBalance, Blz, Bic, Iban, Pin, ProductId, SepaAccount, SecurityHolding,
-        SystemId, TanMethod, Transaction, UserId,
+        AccountBalance, Blz, Pin, ProductId, SepaAccount, SecurityHolding,
+        TanMethod, Transaction, UserId,
     },
     workflow::FetchOpts,
-    BankConfig, BankName, FinTSUrl,
+    BankConfig, CancellationToken, DecoupledEvent, DecoupledOptions,
+    SessionState,
 };
 
 // ═══════════════════════════════════════════════════════════════════════════════
@@ -304,6 +305,10 @@ struct SessionFile {
     #[serde(default)]
     operation_tan_required: HashMap<String, bool>,
     saved_at: String,
+    /// Library session state (system ID, BPD/UPD, TAN method). Lets the next
+    /// run skip the sync dialog and keep the same system ID.
+    #[serde(default)]
+    state: Option<SessionState>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -725,40 +730,80 @@ fn get_product_id(cli: &Cli) -> ProductId {
 }
 
 // ═══════════════════════════════════════════════════════════════════════════════
-// Decoupled TAN polling loop
+// TAN confirmation
 // ═══════════════════════════════════════════════════════════════════════════════
 
-async fn poll_decoupled_tan(
-    dialog: fints::protocol::Dialog<fints::protocol::TanPending>,
-    task_reference: &fints::types::TaskReference,
-    first_wait: u64,
-    next_wait: u64,
-    max_polls: u32,
-) -> fints::error::Result<fints::protocol::Dialog<fints::protocol::Open>> {
-    tokio::time::sleep(Duration::from_secs(first_wait)).await;
+/// If the bank asked for a TAN, wait for the decoupled (app) confirmation.
+/// Ctrl-C cancels cleanly; `--poll-timeout` bounds the wait.
+async fn wait_for_tan(cli: &Cli, flow: &mut Flow) -> Result<(), String> {
+    let Some(challenge) = flow.challenge().cloned() else {
+        return Ok(());
+    };
+    if !challenge.decoupled {
+        return Err(
+            "The bank requires a non-decoupled TAN (chipTAN/smsTAN), which this client does not support."
+                .to_string(),
+        );
+    }
+    if cli.no_wait {
+        return Err("TAN required and --no-wait given; not waiting for confirmation.".to_string());
+    }
+    if !challenge.challenge.as_str().is_empty() {
+        println!("{}", challenge.challenge);
+    }
 
-    let mut dlg = dialog;
-    let mut polls = 0u32;
-
-    loop {
-        polls += 1;
-        if max_polls > 0 && polls > max_polls {
-            return Err(FinTSError::TanTimeout);
+    let cancel = CancellationToken::new();
+    let on_ctrl_c = cancel.clone();
+    tokio::spawn(async move {
+        if tokio::signal::ctrl_c().await.is_ok() {
+            on_ctrl_c.cancel();
         }
-
-        match dlg.poll(task_reference).await? {
-            PollResult::Confirmed(open, _response) => {
-                println!(" confirmed!");
-                return Ok(open);
+    });
+    let opts = DecoupledOptions {
+        timeout: Duration::from_secs(cli.poll_timeout),
+        ..DecoupledOptions::default()
+    };
+    let result = flow
+        .await_decoupled(cancel.clone(), &opts, |event| match event {
+            DecoupledEvent::AwaitingConfirmation { .. } => {
+                print!("Please confirm in your banking app");
+                io::stdout().flush().ok();
             }
-            PollResult::Pending(d) => {
+            DecoupledEvent::StillPending { .. } => {
                 print!(".");
                 io::stdout().flush().ok();
-                tokio::time::sleep(Duration::from_secs(next_wait)).await;
-                dlg = d;
             }
-        }
-    }
+            DecoupledEvent::Confirmed { .. } => println!(" confirmed!"),
+            DecoupledEvent::Waiting { .. } => {}
+        })
+        .await;
+    cancel.cancel(); // stop the Ctrl-C listener's purpose
+    result.map_err(|e| {
+        println!();
+        map_fints_error(&e)
+    })
+}
+
+/// Store the flow's session state back into the session file (unless --no-persist).
+fn persist_state(
+    cli: &Cli,
+    session_name: &str,
+    existing: Option<&SessionFile>,
+    flow: &Flow,
+) -> Result<(), String> {
+    let (Some(existing), false) = (existing, cli.no_persist) else {
+        return Ok(());
+    };
+    let state = flow.session_state();
+    let mut updated = existing.clone();
+    updated.system_id = state.system_id.as_str().to_string();
+    updated.user_id = state.user_id.as_str().to_string();
+    updated.bpd_version = state.bpd_version;
+    updated.upd_version = state.upd_version;
+    updated.saved_at = Utc::now().to_rfc3339();
+    updated.state = Some(state);
+    let session_dir = get_session_dir(cli.session_dir.as_ref());
+    save_session(&session_dir, session_name, &updated)
 }
 
 // ═══════════════════════════════════════════════════════════════════════════════
@@ -1072,6 +1117,9 @@ async fn cmd_setup(cli: &Cli) -> Result<(), String> {
     .map_err(|e| map_fints_error(&e))?;
 
     let system_id = flow.system_id().clone();
+    // Setup only discovers parameters: end the dialog (cancelling a pending
+    // TAN) and keep the state so later commands skip the sync dialog.
+    let state = flow.finish().await.map_err(|e| map_fints_error(&e))?;
 
     println!(
         "Connected. System ID: {}",
@@ -1100,17 +1148,19 @@ async fn cmd_setup(cli: &Cli) -> Result<(), String> {
         blz: bank.blz.clone(),
         user_id: user_id_str.clone(),
         system_id: system_id.as_str().to_string(),
-        bpd_version: 0,
-        upd_version: 0,
+        bpd_version: state.bpd_version,
+        upd_version: state.upd_version,
         tan_methods: challenge.tan_methods.iter().map(TanMethodSer::from).collect(),
-        selected_security_function: challenge
-            .allowed_security_functions
-            .first()
+        selected_security_function: state
+            .tan_method
+            .as_ref()
+            .or(challenge.allowed_security_functions.first())
             .map(|s| s.as_str().to_string())
             .unwrap_or_else(|| "999".to_string()),
-        accounts: Vec::new(),
+        accounts: state.accounts().iter().map(SepaAccountSer::from).collect(),
         operation_tan_required: HashMap::new(),
         saved_at: Utc::now().to_rfc3339(),
+        state: Some(state),
     };
 
     let session_name = cli
@@ -1168,10 +1218,6 @@ async fn cmd_sync(cli: &Cli, sync_args: &SyncArgs) -> Result<(), String> {
     let pin = Pin::new(&pin_str);
     let product_id = get_product_id(cli);
 
-    let system_id = existing_session
-        .as_ref()
-        .map(|s| SystemId::new(&s.system_id));
-
     println!("Initiating connection to {}...", bank.url);
 
     let (mut flow, challenge) = Flow::initiate_with_bank(
@@ -1179,12 +1225,13 @@ async fn cmd_sync(cli: &Cli, sync_args: &SyncArgs) -> Result<(), String> {
         &user_id,
         &pin,
         &product_id,
-        system_id.as_ref(),
+        existing_session.as_ref().and_then(|s| s.state.as_ref()),
         None,
         None,
     )
     .await
     .map_err(|e| map_fints_error(&e))?;
+    wait_for_tan(cli, &mut flow).await?;
 
     println!("Connected. System ID: {}", flow.system_id());
 
@@ -1237,29 +1284,29 @@ async fn cmd_sync(cli: &Cli, sync_args: &SyncArgs) -> Result<(), String> {
         .map(|s| s.as_str().to_string())
         .unwrap_or_else(|| flow.system_id().as_str().to_string());
 
+    let state = flow.session_state();
     let updated_session = SessionFile {
         version: 1,
         bank_id: bank.blz.clone(),
         bank_url: bank.url.clone(),
         blz: bank.blz.clone(),
-        user_id: user_id_str.clone(),
+        user_id: state.user_id.as_str().to_string(),
         system_id: system_id_str,
-        bpd_version: existing_session
-            .as_ref()
-            .map(|s| s.bpd_version)
-            .unwrap_or(0),
-        upd_version: existing_session
-            .as_ref()
-            .map(|s| s.upd_version)
-            .unwrap_or(0),
+        bpd_version: state.bpd_version,
+        upd_version: state.upd_version,
         tan_methods: challenge.tan_methods.iter().map(TanMethodSer::from).collect(),
         selected_security_function: existing_session
             .as_ref()
             .map(|s| s.selected_security_function.clone())
             .unwrap_or_else(|| "999".to_string()),
-        accounts: accounts.clone(),
+        accounts: if accounts.is_empty() {
+            state.accounts().iter().map(SepaAccountSer::from).collect()
+        } else {
+            accounts.clone()
+        },
         operation_tan_required: HashMap::new(),
         saved_at: Utc::now().to_rfc3339(),
+        state: Some(state),
     };
 
     if cli.no_persist {
@@ -1304,21 +1351,18 @@ async fn cmd_balance(cli: &Cli, balance_args: &BalanceArgs) -> Result<(), String
     let user_id = UserId::new(&user_id_str);
     let pin = Pin::new(&pin_str);
     let product_id = get_product_id(cli);
-    let system_id = existing_session
-        .as_ref()
-        .map(|s| SystemId::new(&s.system_id));
-
     let (mut flow, _challenge) = Flow::initiate_with_bank(
         bank.to_bank_ops(),
         &user_id,
         &pin,
         &product_id,
-        system_id.as_ref(),
+        existing_session.as_ref().and_then(|s| s.state.as_ref()),
         None,
         None,
     )
     .await
     .map_err(|e| map_fints_error(&e))?;
+    wait_for_tan(cli, &mut flow).await?;
 
     let accounts = existing_session
         .as_ref()
@@ -1346,6 +1390,7 @@ async fn cmd_balance(cli: &Cli, balance_args: &BalanceArgs) -> Result<(), String
         .confirm_and_fetch(&iban, &bic, 1)
         .await
         .map_err(|e| map_fints_error(&e))?;
+    persist_state(cli, &session_name, existing_session.as_ref(), &flow)?;
 
     if let Some(balance) = &result.balance {
         match cli.output {
@@ -1401,10 +1446,6 @@ async fn cmd_transactions(cli: &Cli, args: &TransactionsArgs) -> Result<(), Stri
     let user_id = UserId::new(&user_id_str);
     let pin = Pin::new(&pin_str);
     let product_id = get_product_id(cli);
-    let system_id = existing_session
-        .as_ref()
-        .map(|s| SystemId::new(&s.system_id));
-
     let today = Utc::now().date_naive();
     let default_from = today - chrono::Duration::days(90);
 
@@ -1443,17 +1484,19 @@ async fn cmd_transactions(cli: &Cli, args: &TransactionsArgs) -> Result<(), Stri
         &user_id,
         &pin,
         &product_id,
-        system_id.as_ref(),
+        existing_session.as_ref().and_then(|s| s.state.as_ref()),
         None,
         None,
     )
     .await
     .map_err(|e| map_fints_error(&e))?;
+    wait_for_tan(cli, &mut flow).await?;
 
     let result = flow
         .confirm_and_fetch(&iban, &bic, days)
         .await
         .map_err(|e| map_fints_error(&e))?;
+    persist_state(cli, &session_name, existing_session.as_ref(), &flow)?;
 
     match cli.output {
         OutputFormat::Human => {
@@ -1536,10 +1579,6 @@ async fn cmd_holdings(cli: &Cli, args: &HoldingsArgs) -> Result<(), String> {
     let user_id = UserId::new(&user_id_str);
     let pin = Pin::new(&pin_str);
     let product_id = get_product_id(cli);
-    let system_id = existing_session
-        .as_ref()
-        .map(|s| SystemId::new(&s.system_id));
-
     let (iban, bic) = resolve_iban_bic_from_args(
         args.iban.as_deref(),
         args.bic.as_deref(),
@@ -1551,18 +1590,20 @@ async fn cmd_holdings(cli: &Cli, args: &HoldingsArgs) -> Result<(), String> {
         &user_id,
         &pin,
         &product_id,
-        system_id.as_ref(),
+        existing_session.as_ref().and_then(|s| s.state.as_ref()),
         None,
         None,
     )
     .await
     .map_err(|e| map_fints_error(&e))?;
+    wait_for_tan(cli, &mut flow).await?;
 
     // Use confirm_and_fetch_opts with holdings-only fetch for efficiency
     let result = flow
         .confirm_and_fetch_opts(&iban, &bic, &FetchOpts { balance: false, transactions: false, holdings: true, days: 0 })
         .await
         .map_err(|e| map_fints_error(&e))?;
+    persist_state(cli, &session_name, existing_session.as_ref(), &flow)?;
     let holdings = result.holdings;
 
     println!("Account: {}", format_iban_display(&iban));
@@ -2211,6 +2252,7 @@ mod tests {
             accounts: Vec::new(),
             operation_tan_required: HashMap::new(),
             saved_at: "2024-01-01T12:00:00Z".to_string(),
+            state: None,
         };
 
         let token = encode_resume_token(&session).unwrap();
@@ -2257,6 +2299,7 @@ mod tests {
             accounts: Vec::new(),
             operation_tan_required: HashMap::new(),
             saved_at: "2024-01-01T00:00:00Z".to_string(),
+            state: None,
         };
 
         save_session(dir.path(), "test", &session).unwrap();

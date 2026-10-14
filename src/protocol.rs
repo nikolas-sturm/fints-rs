@@ -260,8 +260,9 @@ impl Response {
     pub fn check_errors(&self) -> Result<()> {
         for code in self.all_codes() {
             match &code.kind {
-                ResponseCodeKind::PinWrong => return Err(FinTSError::PinWrong),
-                ResponseCodeKind::AccountLocked => return Err(FinTSError::AccountLocked),
+                ResponseCodeKind::PinWrong(_) => return Err(FinTSError::PinWrong),
+                ResponseCodeKind::AccountLocked(_) => return Err(FinTSError::AccountLocked),
+                ResponseCodeKind::SystemIdInvalid => return Err(FinTSError::SystemIdInvalid(code.text.clone())),
                 k if k.is_error() => return Err(FinTSError::BankError {
                     kind: code.kind.clone(),
                     message: code.text.clone(),
@@ -270,6 +271,21 @@ impl Response {
             }
         }
         Ok(())
+    }
+
+    /// Log codes that need no action from a read-only client.
+    pub(crate) fn log_informational_codes(&self) {
+        for code in self.all_codes() {
+            match code.kind {
+                ResponseCodeKind::VopNotRequired | ResponseCodeKind::VopApprovalNotPossible => {
+                    debug!("[FinTS] {} (Verification of Payee) ignored for read-only access: {}", code.code(), code.text);
+                }
+                ResponseCodeKind::OtherWarning(_) => {
+                    debug!("[FinTS] Warning {}: {}", code.code(), code.text);
+                }
+                _ => {}
+            }
+        }
     }
 
     /// Extract allowed TAN security functions from code 3920.
@@ -298,6 +314,11 @@ pub struct TanChallenge {
 // ═══════════════════════════════════════════════════════════════════════════════
 
 /// Cached bank and user parameters discovered during sync/init.
+///
+/// `bpd_segments` / `upd_segments` hold the raw BPD (HIBPA, HIKOM, HITANS,
+/// HIPINS, all `HI…S` parameter segments) and UPD (HIUPA, HIUPD) exactly as
+/// the bank sent them; everything else here is derived from them. A response
+/// that carries a new HIBPA/HIUPA *replaces* the cached set.
 #[derive(Debug, Clone)]
 pub struct BankParams {
     pub bpd_version: u16,
@@ -311,6 +332,15 @@ pub struct BankParams {
     pub operation_tan_required: HashMap<SegmentType, bool>,
     pub allowed_security_functions: Vec<SecurityFunction>,
     pub preferred_security_function: Option<SecurityFunction>,
+    /// Set when the bank reported code 3072 (changed access data): the new
+    /// user ID to use from the next dialog on.
+    pub changed_user_id: Option<UserId>,
+}
+
+/// Is this a BPD segment (bank parameter data)?
+fn is_bpd_segment(stype: &str) -> bool {
+    matches!(stype, "HIBPA" | "HIKOM" | "HISHV" | "HIKPV" | "HIPINS" | "HITANS")
+        || (stype.starts_with("HI") && stype.len() == 6 && stype.ends_with('S'))
 }
 
 impl BankParams {
@@ -325,48 +355,93 @@ impl BankParams {
             operation_tan_required: HashMap::new(),
             allowed_security_functions: Vec::new(),
             preferred_security_function: None,
+            changed_user_id: None,
         }
     }
 
-    /// Ingest BPD/UPD/HITANS/HIPINS/HISYN from a response.
+    /// Ingest BPD/UPD/HISYN/3920/3072 from a response.
     pub fn ingest_response(&mut self, response: &Response, system_id: &mut SystemId) {
-        for seg in &response.segments {
-            let stype = seg.segment_type();
-            match stype {
-                "HIBPA" => self.bpd_version = parse_hibpa_version(seg),
-                "HITANS" => self.tan_methods.extend(parse_hitans(seg)),
-                "HIPINS" => {
-                    let m = parse_hipins(seg);
-                    if !m.is_empty() {
-                        info!("[FinTS] HIPINS: {} operation rules", m.len());
-                        self.operation_tan_required.extend(m);
-                    }
-                }
-                "HIUPA" => self.upd_version = parse_hiupa_version(seg),
-                "HIUPD" => {
-                    self.upd_segments.push(seg.clone());
-                    if let Some(acc) = parse_hiupd(seg) {
-                        self.accounts_from_upd.push(acc);
-                    }
-                }
-                "HISYN" => {
-                    let sid = parse_hisyn_system_id(seg);
-                    if !sid.is_empty() {
-                        info!("[FinTS] System ID: {}", sid);
-                        *system_id = SystemId::new(sid);
-                    }
-                }
-                _ => {
-                    if stype.starts_with("HI") && stype.len() >= 5 && stype.ends_with('S') {
-                        self.bpd_segments.push(seg.clone());
-                    }
-                }
+        let segs = &response.segments;
+
+        let bpd: Vec<RawSegment> = segs.iter().filter(|s| is_bpd_segment(s.segment_type())).cloned().collect();
+        if segs.iter().any(|s| s.segment_type() == "HIBPA") {
+            self.set_bpd(bpd);
+        } else if !bpd.is_empty() {
+            // Parameter segments without a BPD header: merge, as before.
+            let mut merged = std::mem::take(&mut self.bpd_segments);
+            merged.extend(bpd);
+            self.set_bpd(merged);
+        }
+
+        if segs.iter().any(|s| s.segment_type() == "HIUPA") {
+            self.set_upd(segs.iter().filter(|s| matches!(s.segment_type(), "HIUPA" | "HIUPD")).cloned().collect());
+        }
+
+        if let Some(sid) = segs.iter().find(|s| s.segment_type() == "HISYN").map(parse_hisyn_system_id) {
+            if !sid.is_empty() {
+                info!("[FinTS] System ID: {}", sid);
+                *system_id = SystemId::new(sid);
             }
         }
+
         let allowed = response.allowed_security_functions();
         if !allowed.is_empty() {
             self.allowed_security_functions = allowed;
         }
+
+        // 3072: access data changed. hbci4java passes the new user/customer ID
+        // to the application; we also drop the UPD so the next dialog reloads it.
+        for code in response.all_codes() {
+            if let ResponseCodeKind::UserDataChanged { user_id, .. } = &code.kind {
+                warn!("[FinTS] 3072 changed access data: {} (new user ID: {:?})", code.text, user_id);
+                if let Some(uid) = user_id {
+                    self.changed_user_id = Some(UserId::new(uid.clone()));
+                }
+                if !segs.iter().any(|s| s.segment_type() == "HIUPA") {
+                    self.invalidate_upd();
+                }
+            }
+        }
+    }
+
+    /// Replace the BPD and re-derive version, TAN methods and PIN/TAN rules.
+    pub(crate) fn set_bpd(&mut self, segments: Vec<RawSegment>) {
+        self.bpd_version = segments.iter()
+            .find(|s| s.segment_type() == "HIBPA")
+            .map(parse_hibpa_version)
+            .unwrap_or(self.bpd_version);
+        self.tan_methods = segments.iter()
+            .filter(|s| s.segment_type() == "HITANS")
+            .flat_map(parse_hitans)
+            .collect();
+        self.operation_tan_required = segments.iter()
+            .filter(|s| s.segment_type() == "HIPINS")
+            .flat_map(parse_hipins)
+            .collect();
+        info!("[FinTS] BPD v{}: {} segments, {} TAN methods, {} PIN/TAN rules",
+            self.bpd_version, segments.len(), self.tan_methods.len(), self.operation_tan_required.len());
+        self.bpd_segments = segments;
+    }
+
+    /// Replace the UPD and re-derive version and accounts.
+    pub(crate) fn set_upd(&mut self, segments: Vec<RawSegment>) {
+        self.upd_version = segments.iter()
+            .find(|s| s.segment_type() == "HIUPA")
+            .map(parse_hiupa_version)
+            .unwrap_or(self.upd_version);
+        self.accounts_from_upd = segments.iter()
+            .filter(|s| s.segment_type() == "HIUPD")
+            .filter_map(parse_hiupd)
+            .collect();
+        info!("[FinTS] UPD v{}: {} accounts", self.upd_version, self.accounts_from_upd.len());
+        self.upd_segments = segments;
+    }
+
+    /// Forget the cached UPD so the next HKVVB requests it again (version 0).
+    pub fn invalidate_upd(&mut self) {
+        self.upd_version = 0;
+        self.upd_segments.clear();
+        self.accounts_from_upd.clear();
     }
 
     /// Does the given operation require TAN (per HIPINS)? Default: true (safe).
@@ -425,7 +500,15 @@ impl BankParams {
     /// Select the best security function from 3920 allowed list.
     pub fn select_security_function(&mut self) {
         let allowed = &self.allowed_security_functions;
-        if allowed.is_empty() { return; }
+        if allowed.is_empty() {
+            // No 3920 list (yet): honor a cached preference the BPD knows about.
+            if let Some(pref) = &self.preferred_security_function {
+                if self.tan_methods.iter().any(|m| &m.security_function == pref) {
+                    self.selected_security_function = pref.clone();
+                }
+            }
+            return;
+        }
 
         if let Some(ref pref) = self.preferred_security_function {
             if allowed.contains(pref) {
@@ -464,17 +547,77 @@ impl BankParams {
             .unwrap_or(false)
     }
 
-    pub fn decoupled_params(&self) -> (u64, u64, u32) {
+    /// The selected TAN method, if the BPD announces it.
+    pub fn selected_tan_method(&self) -> Option<&TanMethod> {
         self.tan_methods.iter()
-            .find(|m| m.security_function == self.selected_security_function)
-            .map(|m| {
-                let first = if m.wait_before_first_poll > 0 { m.wait_before_first_poll as u64 } else { 5 };
-                let next = if m.wait_before_next_poll > 0 { m.wait_before_next_poll as u64 } else { 5 };
-                let max = if m.decoupled_max_polls > 0 { m.decoupled_max_polls as u32 } else { 20 };
-                (first, next, max)
-            })
-            .unwrap_or((5, 5, 20))
+            .filter(|m| m.security_function == self.selected_security_function)
+            .max_by_key(|m| m.hktan_version)
     }
+
+    /// Decoupled polling parameters of the selected TAN method (HITANS v7).
+    pub fn decoupled_params(&self) -> DecoupledParams {
+        let m = self.selected_tan_method();
+        let secs = |v: i32| u64::try_from(v).ok().filter(|v| *v > 0).map(std::time::Duration::from_secs);
+        DecoupledParams {
+            wait_before_first_poll: m.and_then(|m| secs(m.wait_before_first_poll)),
+            wait_before_next_poll: m.and_then(|m| secs(m.wait_before_next_poll)),
+            // 0 = unlimited per spec; negative = not provided.
+            max_polls: m.and_then(|m| u32::try_from(m.decoupled_max_polls).ok()).filter(|n| *n > 0),
+            auto_polling_allowed: m.and_then(|m| m.decoupled_auto_polling),
+        }
+    }
+}
+
+// ═══════════════════════════════════════════════════════════════════════════════
+// Decoupled TAN polling
+// ═══════════════════════════════════════════════════════════════════════════════
+
+/// Decoupled polling parameters announced by the bank in HITANS v7.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub struct DecoupledParams {
+    /// Minimum wait before the first status request.
+    pub wait_before_first_poll: Option<std::time::Duration>,
+    /// Minimum wait between status requests.
+    pub wait_before_next_poll: Option<std::time::Duration>,
+    /// Maximum number of status requests. `None` = unlimited or not given.
+    pub max_polls: Option<u32>,
+    /// Whether the bank allows automated polling (`None` = not given).
+    pub auto_polling_allowed: Option<bool>,
+}
+
+/// Client-side settings for [`Dialog::await_decoupled`].
+#[derive(Debug, Clone)]
+pub struct DecoupledOptions {
+    /// Give up (and end the dialog) after this long. Banks let a pushTAN
+    /// expire after a few minutes; this guarantees we never hang.
+    pub timeout: std::time::Duration,
+    /// Wait before the first status request when the bank gives no value.
+    pub default_first_wait: std::time::Duration,
+    /// Wait between status requests when the bank gives no value.
+    pub default_next_wait: std::time::Duration,
+}
+
+impl Default for DecoupledOptions {
+    fn default() -> Self {
+        Self {
+            timeout: std::time::Duration::from_secs(300),
+            default_first_wait: std::time::Duration::from_secs(5),
+            default_next_wait: std::time::Duration::from_secs(5),
+        }
+    }
+}
+
+/// Progress of a decoupled confirmation, for showing "confirm in the app".
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum DecoupledEvent {
+    /// Waiting for the user; `challenge` is the bank's text to display.
+    AwaitingConfirmation { challenge: ChallengeText },
+    /// Sleeping before status request number `poll` (1-based).
+    Waiting { poll: u32, delay: std::time::Duration },
+    /// The bank answered 3956: not confirmed yet.
+    StillPending { poll: u32 },
+    /// Confirmed; the dialog is open.
+    Confirmed { polls: u32 },
 }
 
 // ═══════════════════════════════════════════════════════════════════════════════
@@ -551,7 +694,9 @@ impl<S: std::fmt::Debug> Dialog<S> {
 
         self.message_number += 1;
         let response_bytes = self.connection.send(&msg_bytes).await?;
-        parse_response(&response_bytes, self.message_number - 1)
+        let response = parse_response(&response_bytes, self.message_number - 1)?;
+        response.log_informational_codes();
+        Ok(response)
     }
 
     /// Send typed segments with an explicit TAN value in HNSHA.
@@ -564,7 +709,9 @@ impl<S: std::fmt::Debug> Dialog<S> {
         )?;
         self.message_number += 1;
         let response_bytes = self.connection.send(&msg_bytes).await?;
-        parse_response(&response_bytes, self.message_number - 1)
+        let response = parse_response(&response_bytes, self.message_number - 1)?;
+        response.log_informational_codes();
+        Ok(response)
     }
 
     async fn send_end(&mut self) -> Result<()> {
@@ -1093,6 +1240,87 @@ impl Dialog<Open> {
 // ── Dialog<TanPending> ──────────────────────────────────────────────────────
 
 impl Dialog<TanPending> {
+    /// Wait for a decoupled (app) confirmation by polling HKTAN process S.
+    ///
+    /// Follows hbci4java's `shouldPerformDecoupledRefresh`: wait the bank's
+    /// "before first" delay, then its "before next" delay between requests,
+    /// subtracting the time already spent (e.g. in the event callback), and
+    /// fail once the bank's maximum number of status requests is reached.
+    ///
+    /// Ends on: confirmation (→ `Dialog<Open>`), a bank error (e.g. expired
+    /// TAN), the bank's max polls (`DecoupledMaxPolls`), `opts.timeout`
+    /// (`TanTimeout`), or `cancel` (`Cancelled`). On timeout and cancel the
+    /// dialog is ended with HKEND, best effort.
+    ///
+    /// `on_event` is called for UI updates; to feed a channel, pass
+    /// `|e| { let _ = tx.send(e); }`.
+    pub async fn await_decoupled(
+        self,
+        challenge: &TanChallenge,
+        cancel: tokio_util::sync::CancellationToken,
+        opts: &DecoupledOptions,
+        mut on_event: impl FnMut(DecoupledEvent) + Send,
+    ) -> Result<(Dialog<Open>, Response)> {
+        use std::time::Instant;
+
+        let params = self.params.decoupled_params();
+        if params.auto_polling_allowed == Some(false) {
+            warn!("[FinTS] Bank discourages automated decoupled polling; polling at the bank's minimum interval anyway");
+        }
+        let first_wait = params.wait_before_first_poll.unwrap_or(opts.default_first_wait);
+        let next_wait = params.wait_before_next_poll.unwrap_or(opts.default_next_wait);
+        let deadline = Instant::now() + opts.timeout;
+
+        on_event(DecoupledEvent::AwaitingConfirmation { challenge: challenge.challenge.clone() });
+
+        let mut dialog = self;
+        let mut last_request = Instant::now();
+        let mut polls: u32 = 0;
+        loop {
+            if let Some(max) = params.max_polls {
+                if polls >= max {
+                    dialog.cancel().await.ok();
+                    return Err(FinTSError::DecoupledMaxPolls(max));
+                }
+            }
+            let min_gap = if polls == 0 { first_wait } else { next_wait };
+            let delay = min_gap.saturating_sub(last_request.elapsed());
+            if Instant::now() + delay > deadline {
+                info!("[FinTS] Decoupled TAN not confirmed within {:?}", opts.timeout);
+                dialog.cancel().await.ok();
+                return Err(FinTSError::TanTimeout);
+            }
+            on_event(DecoupledEvent::Waiting { poll: polls + 1, delay });
+            tokio::select! {
+                _ = cancel.cancelled() => {
+                    dialog.cancel().await.ok();
+                    return Err(FinTSError::Cancelled);
+                }
+                _ = tokio::time::sleep(delay) => {}
+            }
+
+            polls += 1;
+            let result = tokio::select! {
+                _ = cancel.cancelled() => {
+                    // The request may be in flight; the dialog state is unknown, so don't reuse it.
+                    return Err(FinTSError::Cancelled);
+                }
+                r = dialog.poll(&challenge.task_reference) => r?,
+            };
+            last_request = Instant::now();
+            match result {
+                PollResult::Confirmed(open, response) => {
+                    on_event(DecoupledEvent::Confirmed { polls });
+                    return Ok((open, response));
+                }
+                PollResult::Pending(d) => {
+                    on_event(DecoupledEvent::StillPending { poll: polls });
+                    dialog = d;
+                }
+            }
+        }
+    }
+
     /// Poll decoupled TAN status (HKTAN process S).
     /// Per spec: sends HKTAN alone, no business segments.
     /// Returns `Confirmed` (→ Open) or `Pending` (→ still TanPending).
@@ -1287,6 +1515,40 @@ mod tests {
         ) {
             exercise_parsers(parts.concat().as_bytes());
         }
+    }
+
+    #[test]
+    fn code_3072_records_new_user_id_and_drops_upd() {
+        let mut p = BankParams::new();
+        p.set_upd(parser::parse_message(b"HIUPA:5:4:4+old+7+0'HIUPD:6:6:4+1::280:1+DE111234567800000001+old++EUR+X'").unwrap());
+        assert_eq!(p.upd_version, 7);
+
+        let resp = parse_response(b"HIRMG:2:2+0010::ok'HIRMS:3:2:3+3072::Zugangsdaten geaendert:new-user:new-customer'", 1).unwrap();
+        let mut sid = SystemId::new("S");
+        p.ingest_response(&resp, &mut sid);
+        assert_eq!(p.changed_user_id, Some(UserId::new("new-user")));
+        assert_eq!(p.upd_version, 0, "UPD must be re-requested");
+        assert!(p.accounts_from_upd.is_empty());
+        assert!(resp.check_errors().is_ok(), "3072 is a warning");
+    }
+
+    #[test]
+    fn new_bpd_replaces_cached_bpd_instead_of_appending() {
+        let mut p = params_with_bpd("");
+        let bpd = "HIBPA:1:3:4+10+280:1+Bank+1+1+300'HITANS:2:6:4+1+1+1+J:N:0:910:2:HHD1.3.0:HHD:1.3.0:chipTAN:6:1:TAN:3:J:2:N:0:0:N:N:00:0:N:1'";
+        let resp = parse_response(bpd.as_bytes(), 1).unwrap();
+        let mut sid = SystemId::unassigned();
+        p.ingest_response(&resp, &mut sid);
+        p.ingest_response(&resp, &mut sid);
+        assert_eq!(p.bpd_version, 10);
+        assert_eq!(p.tan_methods.len(), 1, "resent BPD must not duplicate TAN methods");
+    }
+
+    #[test]
+    fn unknown_9xxx_is_a_hard_error_with_code_and_text() {
+        let resp = parse_response(b"HIRMG:2:2+9999::Interner Fehler beim Institut'", 1).unwrap();
+        let err = resp.check_errors().unwrap_err();
+        assert_eq!(err.to_string(), "Bank error 9999: Interner Fehler beim Institut");
     }
 
     #[test]

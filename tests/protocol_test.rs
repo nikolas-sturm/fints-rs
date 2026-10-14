@@ -160,7 +160,7 @@ fn test_response_check_errors_pin_wrong() {
 fn test_response_check_errors_account_locked() {
     let response = Response {
         segments: vec![],
-        global_codes: vec![ResponseCode::new("9942", "Zugang gesperrt")],
+        global_codes: vec![ResponseCode::new("9931", "Zugang gesperrt")],
         segment_codes: vec![],
     };
     let err = response.check_errors().unwrap_err();
