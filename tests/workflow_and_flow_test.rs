@@ -456,3 +456,19 @@ async fn flow_fetches_several_accounts_in_one_dialog() {
     let state = flow.finish().await.unwrap();
     assert!(state.system_id.is_assigned());
 }
+
+/// Compile-time check: a Flow and its futures can run in a background task
+/// (`tokio::spawn` needs `Send`), which is how a dashboard should drive pushTAN.
+#[allow(dead_code)]
+fn flow_futures_are_send() {
+    fn is_send<T: Send>(_: T) {}
+    async fn run(mut flow: Flow) {
+        let _ = flow
+            .await_decoupled(fints::CancellationToken::new(), &fints::DecoupledOptions::default(), |_| {})
+            .await;
+        let account = Account::new("DE89370400440532013000", "COBADEFFXXX").unwrap();
+        let _ = flow.fetch(&account, &FetchOpts::all(30)).await;
+        let _ = flow.finish().await;
+    }
+    let _ = |flow: Flow| is_send(run(flow));
+}

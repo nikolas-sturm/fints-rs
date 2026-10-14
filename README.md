@@ -8,10 +8,16 @@ A pure Rust implementation of the **FinTS 3.0** (formerly HBCI) banking protocol
 ## Features
 
 - Full FinTS 3.0 PinTan implementation (two-step and decoupled TAN)
+- Decoupled TAN (pushTAN) polling in the library, following the bank's HITANS
+  timing rules, with cancellation, timeout and progress events
+- Persistable `SessionState` (system ID, BPD/UPD, TAN method): later runs skip
+  the sync dialog and keep a stable system ID
 - Typestate protocol layer — invalid dialog state transitions are **compile-time errors**
-- Bank-specific workflows (DKB, generic FinTS banks)
+- Bank-specific workflows (DKB, ING, generic FinTS banks)
+- Segment versions negotiated from the bank's BPD; layouts checked against hbci4java's `hbci-300.xml`
+- Quirk layer with hbci4java's message rewriters for misbehaving banks
 - Built-in registry of 1700+ German banks with FinTS endpoints (updated 20.05.2026)
-- Account balance, transaction history (MT940), and securities/depot holdings
+- Account balance, transaction history (MT940), and securities/depot holdings (MT535)
 - CLI client for interactive banking from the terminal
 - Mock server for integration testing
 - Debug & audit tooling for protocol inspection
@@ -39,64 +45,69 @@ This installs the `fints-client` binary.
 
 ## Library Usage
 
-### Quick start — DKB
+### Quick start
 
-```rust
-use fints::{dkb, Account, UserId, Pin, ProductId};
+```rust,no_run
+use fints::{Account, CancellationToken, DecoupledEvent, DecoupledOptions, FetchOpts,
+            Flow, Pin, ProductId, SessionState, UserId};
 
 #[tokio::main]
 async fn main() -> fints::Result<()> {
-    // Step 1: Connect and get TAN challenge
-    let (session, challenge) = dkb::connect(
+    // State from the previous run (stored encrypted), or None the first time.
+    let saved: Option<SessionState> = None;
+
+    // Step 1: open a dialog. BLZ 50010517 = ING; any registry BLZ works.
+    let (mut flow, _info) = Flow::initiate(
+        "50010517",
         &UserId::new("your_user_id"),
         &Pin::new("your_pin"),
         &ProductId::new("YOUR_PRODUCT_ID"),
-        None,
+        saved.as_ref(), None, None,
     ).await?;
 
-    println!("Please confirm in your banking app: {}", challenge.challenge);
+    // Step 2: if the bank wants a pushTAN, wait for the app confirmation.
+    if flow.needs_tan() {
+        flow.await_decoupled(CancellationToken::new(), &DecoupledOptions::default(), |event| {
+            if let DecoupledEvent::AwaitingConfirmation { challenge } = event {
+                println!("Please confirm in your banking app: {challenge}");
+            }
+        }).await?;
+    }
 
-    // Step 2: After user confirms pushTAN, fetch data
-    let account = Account::new("DE12345678901234567890", "BYLADEM1001")?;
-    let result = session.fetch(&account, 365).await?;
+    // Step 3: fetch any number of accounts in the same dialog.
+    let accounts = flow.accounts().to_vec();
+    for acc in &accounts {
+        let account = Account::from_sepa(acc, "INGDDEFFXXX")?;
+        let result = flow.fetch(&account, &FetchOpts::all(90)).await?;
+        println!("{}: {:?}, {} transactions, {} holdings",
+            acc.iban, result.balance.map(|b| b.amount),
+            result.transactions.len(), result.holdings.len());
+    }
 
-    println!("Balance: {:?}", result.balance);
-    println!("{} transactions", result.transactions.len());
+    // Step 4: end the dialog and persist the updated state for next time.
+    let state = flow.finish().await?;
+    let _json = state.to_json()?; // store encrypted; it identifies you to the bank
     Ok(())
 }
 ```
 
-### Generic bank access (any FinTS bank)
+A runnable version is in [`examples/sync_accounts.rs`](examples/sync_accounts.rs).
 
-```rust
-use fints::{Flow, UserId, Pin, ProductId};
+Notes:
 
-#[tokio::main]
-async fn main() -> fints::Result<()> {
-    // Step 1: Initiate — pass BLZ to auto-resolve the bank
-    let (mut flow, challenge) = Flow::initiate(
-        "12030000",  // BLZ (bank code)
-        &UserId::new("your_user_id"),
-        &Pin::new("your_pin"),
-        &ProductId::new("YOUR_PRODUCT_ID"),
-        None, None, None,
-    ).await?;
-
-    println!("TAN challenge: {}", challenge.challenge);
-
-    // Step 2: After TAN confirmation, fetch balance + transactions
-    let result = flow.confirm_and_fetch(
-        "DE12345678901234567890",  // IBAN
-        "BYLADEM1001",             // BIC
-        90,                        // days of history
-    ).await?;
-
-    println!("Balance: {:?}", result.balance);
-    println!("{} transactions", result.transactions.len());
-    println!("{} holdings", result.holdings.len());
-    Ok(())
-}
-```
+- **Session state.** `SessionState` holds the system ID, BPD/UPD and the chosen
+  TAN method. It is not a credential, but store it encrypted. With it, the next
+  `initiate` skips the sync dialog and the bank keeps seeing the same system ID
+  (a new one per run can trigger extra SCA). If the bank rejects the system ID
+  (9391), the library re-synchronizes once by itself. When the bank reports a
+  changed user ID (3072), `state.user_id` holds the new one and
+  `state.previous_user_id` the old one.
+- **Decoupled TAN.** `await_decoupled` polls HKTAN process S at the bank's
+  announced intervals and stops on confirmation, a bank error, the bank's maximum
+  number of polls, `DecoupledOptions::timeout`, or the `CancellationToken`. Run it in
+  a background task (`Flow` is `Send`) and never block an HTTP request on a pushTAN.
+- **One-shot helpers.** `confirm_and_fetch(iban, bic, days)` still exists: it polls
+  the TAN status once, fetches one account and ends the dialog.
 
 ### Bank lookup
 
@@ -127,6 +138,13 @@ use fints::types::*;
 ```
 
 States: `New` → `Synced` → `Open` → `TanPending` → back to `Open` after TAN.
+
+### Bank quirks
+
+Every message passes through a `QuirkChain` (default: hbci4java's rewriters, e.g.
+wrong status-segment order, wrong segment numbers, missing message reference).
+Add bank-specific fixes with `Dialog::with_quirks(QuirkChain::default().with(MyFix))`
+by implementing the `fints::quirks::Quirk` trait.
 
 ## CLI Usage
 
@@ -227,7 +245,7 @@ All data commands support `--output human` (default), `--output json`, and `--ou
 ┌─────────────────────────────────────────────────┐
 │                    Flow API                     │  ← High-level 2-step TAN flow
 ├─────────────────────────────────────────────────┤
-│                 Workflow layer                  │  ← Bank-specific logic (DKB, Generic)
+│                 Workflow layer                  │  ← Bank-specific logic (DKB, ING, Generic)
 │            BankOps trait + AnyBank              │
 ├─────────────────────────────────────────────────┤
 │               Protocol layer                   │  ← Typestate Dialog<S> state machine
@@ -237,6 +255,8 @@ All data commands support `--output human` (default), `--output json`, and `--ou
 ├──────────────────┼──────────────────────────────┤
 │  Parser          │     Serializer               │  ← Wire format (DEG/DE encoding)
 ├──────────────────┴──────────────────────────────┤
+│        Quirks (hbci4java rewriters)             │  ← Patch malformed bank messages
+├─────────────────────────────────────────────────┤
 │              Transport (HTTPS)                  │  ← Base64 over HTTPS POST
 └─────────────────────────────────────────────────┘
 ```
@@ -260,4 +280,6 @@ To use FinTS with German banks in production, you need a registered product ID f
 
 ## License
 
-MIT
+MIT, except for code and data ported from [hbci4java](https://github.com/hbci4j/hbci4java),
+which is LGPL-2.1-or-later and kept in separate files: `src/quirks/hbci4java.rs` and
+`tests/fixtures/hbci4java/`. See [NOTICE](NOTICE) and [LICENSES/](LICENSES/).

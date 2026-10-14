@@ -440,6 +440,10 @@ impl Dkb {
     }
 }
 
+impl Default for Dkb {
+    fn default() -> Self { Self::new() }
+}
+
 impl BankOps for Dkb {
     fn config(&self) -> &BankConfig { &self.bank }
 
@@ -506,6 +510,10 @@ impl Ing {
             }),
         }
     }
+}
+
+impl Default for Ing {
+    fn default() -> Self { Self::new() }
 }
 
 impl BankOps for Ing {

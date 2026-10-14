@@ -752,13 +752,23 @@ async fn wait_for_tan(cli: &Cli, flow: &mut Flow) -> Result<(), String> {
         println!("{}", challenge.challenge);
     }
 
+    // Ctrl-C cancels the wait cleanly (HKEND). Registering a handler replaces
+    // the default SIGINT behavior for the whole process, so once the wait is
+    // over a Ctrl-C exits as usual.
     let cancel = CancellationToken::new();
-    let on_ctrl_c = cancel.clone();
-    tokio::spawn(async move {
-        if tokio::signal::ctrl_c().await.is_ok() {
-            on_ctrl_c.cancel();
-        }
-    });
+    let waiting = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(true));
+    {
+        let (cancel, waiting) = (cancel.clone(), waiting.clone());
+        tokio::spawn(async move {
+            while tokio::signal::ctrl_c().await.is_ok() {
+                if waiting.load(std::sync::atomic::Ordering::SeqCst) {
+                    cancel.cancel();
+                } else {
+                    std::process::exit(130);
+                }
+            }
+        });
+    }
     let opts = DecoupledOptions {
         timeout: Duration::from_secs(cli.poll_timeout),
         ..DecoupledOptions::default()
@@ -777,7 +787,7 @@ async fn wait_for_tan(cli: &Cli, flow: &mut Flow) -> Result<(), String> {
             DecoupledEvent::Waiting { .. } => {}
         })
         .await;
-    cancel.cancel(); // stop the Ctrl-C listener's purpose
+    waiting.store(false, std::sync::atomic::Ordering::SeqCst);
     result.map_err(|e| {
         println!();
         map_fints_error(&e)
