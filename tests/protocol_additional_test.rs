@@ -155,6 +155,8 @@ fn test_bankparams_select_security_function_prefers_decoupled() {
             wait_before_next_poll: 0,
             is_decoupled: false,
             hktan_version: 7,
+            zka_name: None,
+            decoupled_auto_polling: None,
         },
         TanMethod {
             security_function: SecurityFunction::new("940"),
@@ -166,6 +168,8 @@ fn test_bankparams_select_security_function_prefers_decoupled() {
             wait_before_next_poll: 5,
             is_decoupled: true,
             hktan_version: 7,
+            zka_name: None,
+            decoupled_auto_polling: None,
         },
     ];
     params.select_security_function();
@@ -196,6 +200,8 @@ fn test_bankparams_select_security_function_uses_preference() {
             wait_before_next_poll: 0,
             is_decoupled: false,
             hktan_version: 7,
+            zka_name: None,
+            decoupled_auto_polling: None,
         },
         TanMethod {
             security_function: SecurityFunction::new("940"),
@@ -207,6 +213,8 @@ fn test_bankparams_select_security_function_uses_preference() {
             wait_before_next_poll: 5,
             is_decoupled: true,
             hktan_version: 7,
+            zka_name: None,
+            decoupled_auto_polling: None,
         },
     ];
     params.select_security_function();

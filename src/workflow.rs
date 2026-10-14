@@ -167,8 +167,14 @@ pub struct Dkb {
 impl Dkb {
     pub fn new() -> Self {
         Self {
-            bank: crate::banks::bank_by_blz("12030000")
-                .expect("DKB (BLZ 12030000) must be in bank registry"),
+            bank: crate::banks::bank_by_blz("12030000").unwrap_or_else(|| {
+                BankConfig::new(
+                    "Deutsche Kreditbank Berlin (DKB) AG",
+                    "12030000",
+                    "BYLADEM1001",
+                    "https://fints.dkb.de/fints",
+                )
+            }),
         }
     }
 }
@@ -323,9 +329,16 @@ impl BankOps for Dkb {
         let mut touchdown: Option<TouchdownPoint> = None;
 
         loop {
-            let result = dialog.holdings(
-                account, None, touchdown.as_ref(),
-            ).await?;
+            let result = match dialog.holdings(account, None, touchdown.as_ref()).await {
+                Ok(r) => r,
+                // Bank offers no HKWPD we can build (or the account can't be
+                // addressed nationally): no depot, not a failure.
+                Err(FinTSError::SegmentNotSupported(why)) if all_holdings.is_empty() => {
+                    info!("[DKB] Holdings not available: {}", why);
+                    return Ok(all_holdings);
+                }
+                Err(e) => return Err(e),
+            };
 
             match result {
                 HoldingsResult::NeedTan(_) => {

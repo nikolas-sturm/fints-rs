@@ -44,7 +44,10 @@ pub(crate) fn build_from_segments(
     params: &BankParams,
 ) -> Result<Vec<u8>, FinTSError> {
     // Convert typed segments to raw DEGs
-    let business_degs: Vec<Vec<DEG>> = segments.iter().map(|s| s.to_degs(params)).collect();
+    let business_degs: Vec<Vec<DEG>> = segments
+        .iter()
+        .map(|s| s.to_degs(params))
+        .collect::<Result<_, _>>()?;
     build_message_raw(ctx, business_degs)
 }
 
@@ -113,11 +116,13 @@ fn build_message_raw(
     // Rebuild header with correct size
     let hnhbk_final = hnhbk(total_size as u32, ctx.dialog_id, ctx.message_number);
     let header_final = serializer::serialize_segment(&hnhbk_final)?;
-    assert_eq!(
-        header_final.len(),
-        header_bytes.len(),
-        "Header size changed after size update!"
-    );
+    if header_final.len() != header_bytes.len() {
+        return Err(FinTSError::Serialize(format!(
+            "HNHBK size changed after size update ({} → {} bytes)",
+            header_bytes.len(),
+            header_final.len()
+        )));
+    }
 
     let mut message = Vec::with_capacity(total_size);
     message.extend(header_final);

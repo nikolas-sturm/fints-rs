@@ -246,6 +246,8 @@ fn test_bank_params_select_security_function_prefers_decoupled() {
             wait_before_next_poll: 0,
             is_decoupled: false,
             hktan_version: 7,
+            zka_name: None,
+            decoupled_auto_polling: None,
         },
         fints::TanMethod {
             security_function: fints::SecurityFunction::new("940"),
@@ -257,6 +259,8 @@ fn test_bank_params_select_security_function_prefers_decoupled() {
             wait_before_next_poll: 5,
             is_decoupled: true,
             hktan_version: 7,
+            zka_name: None,
+            decoupled_auto_polling: None,
         },
     ];
     params.select_security_function();
@@ -285,6 +289,8 @@ fn test_bank_params_select_respects_user_preference() {
         wait_before_next_poll: 0,
         is_decoupled: false,
         hktan_version: 7,
+        zka_name: None,
+        decoupled_auto_polling: None,
     }];
     params.select_security_function();
     assert_eq!(

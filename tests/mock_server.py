@@ -75,7 +75,7 @@ def make_server(host="127.0.0.1", port=0):
                         "HIKAZS:10:7:4+1+1+1+365:J:N'"
                         "HISPAS:31:1:4+1+1+1+J:J:N:sepade?:xsd?:pain.001.003.03.xsd'"
                         "HISALS:19:7:4+1+1+1'"
-                        "HITANS:53:7:4+1+1+1+N:N:0:942:2:MTAN2:mobileTAN::mobile TAN:6:1:SMS:3:1:J:1:0:N:0:2:N:J:00:1:1:962:2:HHD1.4:HHD:1.4:Smart-TAN plus manuell:6:1:Challenge:3:1:J:1:0:N:0:2:N:J:00:1:1'"
+                        "HITANS:53:5:4+1+1+1+N:N:0:942:2:MTAN2:mobileTAN::mobile TAN:6:1:SMS:3:1:J:1:0:N:0:2:N:J:00:1:1:962:2:HHD1.4:HHD:1.4:Smart-TAN plus manuell:6:1:Challenge:3:1:J:1:0:N:0:2:N:J:00:1:1'"
                         "HIPINS:54:1:4+1+1+1+5:20:6:Benutzer ID::HKSPA:N:HKKAZ:N:HKSAL:N:HKTAN:N'"
                     ).format(host=host, port=server.server_address[1])
                     segments.append(bpd.encode("us-ascii"))

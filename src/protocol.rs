@@ -109,47 +109,41 @@ pub(crate) enum Segment {
 }
 
 impl Segment {
-    /// Convert to raw DEGs using bank parameters for version selection.
-    pub(crate) fn to_degs(&self, params: &BankParams) -> Vec<DEG> {
+    /// Convert to raw DEGs, choosing segment versions from the bank's BPD.
+    pub(crate) fn to_degs(&self, params: &BankParams) -> Result<Vec<DEG>> {
         use crate::segments::builder::*;
-        match self {
+        let td = |t: &Option<TouchdownPoint>| t.as_ref().map(|t| t.as_str().to_string());
+        Ok(match self {
             Segment::Identify { blz, user_id, system_id } => {
                 hkidn(0, blz.as_str(), user_id.as_str(), system_id.as_str())
             }
             Segment::ProcessPrep { bpd_version, upd_version, product_id } => {
                 hkvvb(0, *bpd_version, *upd_version, product_id.as_str())
             }
-            Segment::Sync => {
-                hksyn(0)
-            }
+            Segment::Sync => hksyn(0),
             Segment::Balance { account } => {
-                let version = params.supported_version("HISALS", 7).max(5);
-                hksal(0, version, account.iban(), account.bic(), None)
+                let version = params.negotiate_version("HISALS", HKSAL_VERSIONS, 7)?;
+                hksal(0, version, account, None)?
             }
             Segment::Transactions { account, start_date, end_date, touchdown } => {
-                let version = params.supported_version("HIKAZS", 7).max(5);
-                hkkaz(0, version, account.iban(), account.bic(), *start_date, *end_date, touchdown.as_ref().map(|t| t.as_str()))
+                let version = params.negotiate_version("HIKAZS", HKKAZ_VERSIONS, 7)?;
+                hkkaz(0, version, account, *start_date, *end_date, td(touchdown).as_deref())?
             }
             Segment::Holdings { account, currency, touchdown } => {
-                let version = params.supported_version("HIWPDS", 7).max(1);
-                hkwpd(0, version, account.iban(), account.bic(), currency.as_ref().map(|c| c.as_str()), touchdown.as_ref().map(|t| t.as_str()))
+                let version = params.negotiate_version("HIWPDS", HKWPD_VERSIONS, 6)?;
+                hkwpd(0, version, account, currency.as_ref().map(|c| c.as_str()), td(touchdown).as_deref())?
             }
             Segment::TanProcess4 { reference_seg, tan_medium } => {
-                let version = params.hktan_version();
-                hktan_process4(0, version, reference_seg.as_str(), tan_medium.as_ref().map(|t| t.as_str()))
+                hktan_process4(0, params.hktan_version(), reference_seg.as_str(), tan_medium.as_ref().map(|t| t.as_str()))?
             }
             Segment::TanPollDecoupled { task_reference, tan_medium } => {
-                let version = params.hktan_version();
-                hktan_process_s(0, version, task_reference.as_str(), tan_medium.as_ref().map(|t| t.as_str()))
+                hktan_process_s(0, params.hktan_version(), task_reference.as_str(), tan_medium.as_ref().map(|t| t.as_str()))?
             }
             Segment::TanProcess2 { task_reference, tan_medium } => {
-                let version = params.hktan_version();
-                hktan_process2(0, version, task_reference.as_str(), tan_medium.as_ref().map(|t| t.as_str()))
+                hktan_process2(0, params.hktan_version(), task_reference.as_str(), tan_medium.as_ref().map(|t| t.as_str()))?
             }
-            Segment::End { dialog_id } => {
-                hkend(0, dialog_id.as_str())
-            }
-        }
+            Segment::End { dialog_id } => hkend(0, dialog_id.as_str()),
+        })
     }
 }
 
@@ -250,18 +244,16 @@ impl Response {
 
     /// Extract HITAN challenge from response.
     pub fn get_tan_challenge(&self) -> Option<TanChallenge> {
-        if let Some(hitan) = self.find_segment("HITAN") {
-            let (task_ref, challenge, hhduc) = parse_hitan(hitan);
-            if !task_ref.is_empty() || !challenge.is_empty() {
-                return Some(TanChallenge {
-                    challenge: ChallengeText::new(challenge),
-                    challenge_hhduc: hhduc.map(HhdUcData),
-                    task_reference: TaskReference::new(task_ref),
-                    decoupled: self.is_decoupled(),
-                });
-            }
+        let hitan = parse_hitan(self.find_segment("HITAN")?);
+        if hitan.task_reference.is_empty() && hitan.challenge.is_empty() {
+            return None;
         }
-        None
+        Some(TanChallenge {
+            challenge: ChallengeText::new(hitan.challenge),
+            challenge_hhduc: hitan.challenge_hhduc.map(HhdUcData),
+            task_reference: TaskReference::new(hitan.task_reference),
+            decoupled: self.is_decoupled(),
+        })
     }
 
     /// Check for fatal errors. Returns `Ok(())` if no errors.
@@ -382,11 +374,18 @@ impl BankParams {
         self.operation_tan_required.get(segment_type).copied().unwrap_or(true)
     }
 
-    /// HKTAN version for the selected TAN method.
+    /// HKTAN version to send: the highest HITANS version (that we can build)
+    /// announcing the selected security function; otherwise the highest HITANS
+    /// version overall; otherwise 7.
     pub fn hktan_version(&self) -> u16 {
+        use crate::segments::builder::HKTAN_VERSIONS;
+        let buildable = |m: &&TanMethod| HKTAN_VERSIONS.contains(&m.hktan_version);
         self.tan_methods.iter()
-            .find(|m| m.security_function == self.selected_security_function)
+            .filter(buildable)
+            .filter(|m| m.security_function == self.selected_security_function)
             .map(|m| m.hktan_version)
+            .max()
+            .or_else(|| self.tan_methods.iter().filter(buildable).map(|m| m.hktan_version).max())
             .unwrap_or(7)
     }
 
@@ -397,6 +396,30 @@ impl BankParams {
         info!("[FinTS] BPD lookup: {} → found v{} (BPD has v{}, max={})",
             param_segment_type, result, v, max_version);
         result
+    }
+
+    /// Pick the segment version to send: the highest version the bank offers
+    /// in its BPD (`param_segment_type`, e.g. "HISALS") that we implement.
+    ///
+    /// - No BPD known at all → `fallback` (lets callers work before the first sync).
+    /// - BPD known but the bank offers no version we implement →
+    ///   `SegmentNotSupported` instead of sending something the bank will reject.
+    pub fn negotiate_version(&self, param_segment_type: &str, implemented: &[u16], fallback: u16) -> Result<u16> {
+        if self.bpd_segments.is_empty() {
+            return Ok(fallback);
+        }
+        let offered: Vec<u16> = self.bpd_segments.iter()
+            .filter(|s| s.segment_type() == param_segment_type)
+            .map(|s| s.segment_version())
+            .collect();
+        let chosen = offered.iter().copied().filter(|v| implemented.contains(v)).max();
+        debug!("[FinTS] Version negotiation {}: bank offers {:?}, we implement {:?} → {:?}",
+            param_segment_type, offered, implemented, chosen);
+        chosen.ok_or_else(|| FinTSError::SegmentNotSupported(if offered.is_empty() {
+            format!("bank does not offer {}", param_segment_type)
+        } else {
+            format!("bank offers {} v{:?}, client implements v{:?}", param_segment_type, offered, implemented)
+        }))
     }
 
     /// Select the best security function from 3920 allowed list.
@@ -522,7 +545,9 @@ impl<S: std::fmt::Debug> Dialog<S> {
 
         let msg_str = String::from_utf8_lossy(&msg_bytes);
         let redacted = msg_str.replace(self.pin.as_str(), "***PIN***");
-        info!("[FinTS] Outgoing ({} bytes): {}", msg_bytes.len(), &redacted[..redacted.len().min(500)]);
+        // Truncate on a char boundary: slicing the String by byte index panics on umlauts.
+        let preview: String = redacted.chars().take(500).collect();
+        info!("[FinTS] Outgoing ({} bytes): {}", msg_bytes.len(), preview);
 
         self.message_number += 1;
         let response_bytes = self.connection.send(&msg_bytes).await?;
@@ -732,26 +757,99 @@ impl Dialog<Synced> {
 /// let bad = Account::new("DE89370400440532013000", "");
 /// assert!(bad.is_err());
 /// ```
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 pub struct Account {
     iban: Iban,
     bic: Bic,
+    /// National account number (Kontonummer), needed for KTV-based segment versions.
+    number: Option<String>,
+    /// Sub-account feature (Unterkontomerkmal).
+    subaccount: Option<String>,
+    /// Bank code of the account.
+    blz: Option<Blz>,
 }
 
 impl Account {
     /// Create a validated account. Returns `Err` if IBAN or BIC is empty.
+    ///
+    /// For German IBANs (`DEkk BBBBBBBB CCCCCCCCCC`) the national account
+    /// number and BLZ are derived automatically, so older segment versions that
+    /// address accounts nationally (HKSAL v5/6, HKKAZ v5/6, HKWPD) work too.
     pub fn new(iban: &str, bic: &str) -> Result<Self> {
+        let iban = iban.trim();
         if iban.is_empty() {
             return Err(FinTSError::Dialog("IBAN must not be empty".into()));
         }
-        if bic.is_empty() {
+        if bic.trim().is_empty() {
             return Err(FinTSError::Dialog("BIC must not be empty. Please set the BIC in the account settings.".into()));
         }
-        Ok(Self { iban: Iban::new(iban), bic: Bic::new(bic) })
+        let compact: String = iban.chars().filter(|c| !c.is_whitespace()).collect::<String>().to_ascii_uppercase();
+        let (number, blz) = match german_iban_parts(&compact) {
+            Some((blz, number)) => (Some(number), Some(Blz::new(blz))),
+            None => (None, None),
+        };
+        Ok(Self { iban: Iban::new(compact), bic: Bic::new(bic.trim()), number, subaccount: None, blz })
+    }
+
+    /// Create an account addressed only nationally (account/depot number + BLZ).
+    ///
+    /// Depots usually appear in the UPD without an IBAN; HKWPD addresses them
+    /// this way. Segment versions that need an IBAN (KTI) fail for such accounts.
+    pub fn national(number: &str, subaccount: Option<&str>, blz: &Blz, bic: &str) -> Result<Self> {
+        if number.trim().is_empty() || blz.as_str().is_empty() {
+            return Err(FinTSError::Dialog("Account number and BLZ must not be empty".into()));
+        }
+        Ok(Self {
+            iban: Iban::new(""),
+            bic: Bic::new(bic.trim()),
+            number: None,
+            subaccount: None,
+            blz: None,
+        }
+        .with_national(number.trim(), subaccount, blz))
+    }
+
+    /// Build an account from UPD/SEPA account info, keeping the bank's national
+    /// account number when present. Falls back to `bank_bic` if the UPD has no BIC.
+    pub fn from_sepa(acc: &SepaAccount, bank_bic: &str) -> Result<Self> {
+        let bic = if acc.bic.as_str().is_empty() { bank_bic } else { acc.bic.as_str() };
+        let base = if acc.iban.as_str().is_empty() {
+            return Self::national(&acc.account_number, Some(&acc.sub_account), &acc.blz, bic);
+        } else {
+            Self::new(acc.iban.as_str(), bic)?
+        };
+        Ok(if !acc.account_number.is_empty() && !acc.blz.as_str().is_empty() {
+            base.with_national(&acc.account_number, Some(&acc.sub_account), &acc.blz)
+        } else {
+            base
+        })
+    }
+
+    /// Set the national account identification explicitly (e.g. from HIUPD),
+    /// overriding what was derived from the IBAN.
+    pub fn with_national(mut self, number: &str, subaccount: Option<&str>, blz: &Blz) -> Self {
+        self.number = Some(number.to_string());
+        self.subaccount = subaccount.filter(|s| !s.is_empty()).map(str::to_string);
+        self.blz = Some(blz.clone());
+        self
     }
 
     pub fn iban(&self) -> &str { self.iban.as_str() }
     pub fn bic(&self) -> &str { self.bic.as_str() }
+    pub fn account_number(&self) -> Option<&str> { self.number.as_deref() }
+    pub fn subaccount(&self) -> Option<&str> { self.subaccount.as_deref() }
+    pub fn blz(&self) -> Option<&str> { self.blz.as_ref().map(|b| b.as_str()) }
+}
+
+/// Split a German IBAN into (BLZ, account number without leading zeros).
+fn german_iban_parts(iban: &str) -> Option<(String, String)> {
+    if iban.len() != 22 || !iban.starts_with("DE") || !iban[2..].bytes().all(|b| b.is_ascii_digit()) {
+        return None;
+    }
+    let blz = iban[4..12].to_string();
+    let trimmed = iban[12..22].trim_start_matches('0');
+    let number = if trimmed.is_empty() { "0" } else { trimmed };
+    Some((blz, number.to_string()))
 }
 
 // ═══════════════════════════════════════════════════════════════════════════════
@@ -1087,4 +1185,121 @@ fn parse_response(data: &[u8], expected_msg_num: u16) -> Result<Response> {
     }
 
     Ok(Response { segments: all_segments, global_codes, segment_codes })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::segments::builder::{HKKAZ_VERSIONS, HKSAL_VERSIONS, HKWPD_VERSIONS};
+
+    fn params_with_bpd(raw: &str) -> BankParams {
+        let mut p = BankParams::new();
+        p.bpd_segments = parser::parse_message(raw.as_bytes()).unwrap();
+        p
+    }
+
+    #[test]
+    fn negotiate_picks_highest_common_version() {
+        let p = params_with_bpd("HISALS:1:5:4+1+1'HISALS:2:7:4+1+1+1'HISALS:3:9:4+1+1+1'");
+        assert_eq!(p.negotiate_version("HISALS", HKSAL_VERSIONS, 7).unwrap(), 7);
+    }
+
+    #[test]
+    fn negotiate_falls_back_without_bpd() {
+        assert_eq!(BankParams::new().negotiate_version("HIKAZS", HKKAZ_VERSIONS, 7).unwrap(), 7);
+    }
+
+    #[test]
+    fn negotiate_errors_when_bank_lacks_segment_or_versions() {
+        let p = params_with_bpd("HISALS:1:7:4+1+1+1'HIWPDS:2:3:4+1+1+1'");
+        assert!(matches!(
+            p.negotiate_version("HIKAZS", HKKAZ_VERSIONS, 7),
+            Err(FinTSError::SegmentNotSupported(_))
+        ));
+        assert!(matches!(
+            p.negotiate_version("HIWPDS", HKWPD_VERSIONS, 6),
+            Err(FinTSError::SegmentNotSupported(_))
+        ));
+    }
+
+    #[test]
+    fn hktan_version_prefers_highest_buildable_for_selected_method() {
+        let mut p = BankParams::new();
+        let m = |sf: &str, v: u16| TanMethod {
+            security_function: SecurityFunction::new(sf), tan_process: TanProcess::TwoStep,
+            name: sf.into(), needs_tan_medium: false, decoupled_max_polls: -1,
+            wait_before_first_poll: 0, wait_before_next_poll: 0, is_decoupled: false,
+            hktan_version: v, zka_name: None, decoupled_auto_polling: None,
+        };
+        p.tan_methods = vec![m("902", 6), m("902", 7), m("902", 8), m("912", 6)];
+        p.selected_security_function = SecurityFunction::new("902");
+        assert_eq!(p.hktan_version(), 7);
+        // PIN-only (999) is not in HITANS: use the highest buildable HITANS version.
+        p.selected_security_function = SecurityFunction::pin_only();
+        assert_eq!(p.hktan_version(), 7);
+    }
+
+    /// Run every response-side parser over a message; none may panic.
+    fn exercise_parsers(data: &[u8]) {
+        if let Ok(resp) = parse_response(data, 1) {
+            let _ = resp.check_errors();
+            let _ = resp.get_tan_challenge();
+            let _ = resp.touchdown();
+            let mut params = BankParams::new();
+            let mut sid = SystemId::unassigned();
+            params.ingest_response(&resp, &mut sid);
+            params.select_security_function();
+            for seg in &resp.segments {
+                let _ = parse_hisal(seg);
+                let _ = parse_hitan(seg);
+                let _ = parse_hiupd(seg);
+                let _ = parse_hitans(seg);
+            }
+            let _ = parse_hiwpd(&resp.segments);
+            let _ = extract_mt940_data(&resp.segments);
+        }
+    }
+
+    proptest::proptest! {
+        #[test]
+        fn response_pipeline_never_panics_on_random_bytes(data in proptest::collection::vec(proptest::num::u8::ANY, 0..512)) {
+            exercise_parsers(&data);
+        }
+
+        #[test]
+        fn response_pipeline_never_panics_on_segment_shaped_input(
+            parts in proptest::collection::vec(
+                proptest::prop_oneof![
+                    proptest::strategy::Just("HIRMG:2:2+".to_string()),
+                    proptest::strategy::Just("HIRMS:3:2:3+".to_string()),
+                    proptest::strategy::Just("HITANS:4:7:4+1+1+1+".to_string()),
+                    proptest::strategy::Just("HISAL:5:7:3+".to_string()),
+                    proptest::strategy::Just("HITAN:6:7:4+".to_string()),
+                    proptest::strategy::Just("HIUPD:7:6:4+".to_string()),
+                    proptest::strategy::Just("HIWPD:8:6:3+".to_string()),
+                    proptest::strategy::Just("HNVSD:999:1+".to_string()),
+                    proptest::strategy::Just("@5@".to_string()),
+                    proptest::strategy::Just("@99999999999999999999@".to_string()),
+                    "[0-9A-Z:+?' ,]{0,12}",
+                ],
+                0..24,
+            )
+        ) {
+            exercise_parsers(parts.concat().as_bytes());
+        }
+    }
+
+    #[test]
+    fn account_derives_national_parts_from_german_iban() {
+        let a = Account::new("DE89 3704 0044 0532 0130 00", "COBADEFFXXX").unwrap();
+        assert_eq!(a.iban(), "DE89370400440532013000");
+        assert_eq!(a.blz(), Some("37040044"));
+        assert_eq!(a.account_number(), Some("532013000"));
+
+        let foreign = Account::new("AT611904300234573201", "BKAUATWW").unwrap();
+        assert_eq!(foreign.account_number(), None);
+
+        let explicit = foreign.with_national("234573201", Some("01"), &Blz::new("19043"));
+        assert_eq!(explicit.subaccount(), Some("01"));
+    }
 }

@@ -39,105 +39,118 @@ fn looks_like_bic(s: &str) -> bool {
         && bytes[6..].iter().all(|b| b.is_ascii_alphanumeric())
 }
 
-/// Parse TAN methods from HITANS response segment(s).
-/// HITANS contains TwoStepParameters (one per supported TAN method) in its DEGs.
+/// Position of the interesting fields inside one HITANS TAN-method group,
+/// per `TAN2StepParams1`–`7` in the FinTS 3.0 PIN/TAN security spec.
+struct HitansLayout {
+    /// Number of DEs before the first method group (`can1step:canmultitangvs:orderhashmode[:instsig]`).
+    prefix: usize,
+    /// Number of DEs per method group.
+    stride: usize,
+    /// Index of the DK/ZKA method name (e.g. "Decoupled"), if the version has one.
+    zka_name: Option<usize>,
+    /// Index of the human-readable method name.
+    name: usize,
+    /// Index of "Bezeichnung des TAN-Mediums erforderlich" (0 = no, 1 = optional, 2 = required).
+    needs_tan_medium: Option<usize>,
+    /// Index of the first decoupled field (max polls, wait first, wait next, manual ack, auto poll).
+    decoupled: Option<usize>,
+}
+
+fn hitans_layout(version: u16) -> HitansLayout {
+    match version {
+        1 => HitansLayout { prefix: 4, stride: 11, zka_name: None, name: 3, needs_tan_medium: None, decoupled: None },
+        2 => HitansLayout { prefix: 3, stride: 15, zka_name: None, name: 3, needs_tan_medium: None, decoupled: None },
+        3 => HitansLayout { prefix: 3, stride: 18, zka_name: None, name: 3, needs_tan_medium: Some(16), decoupled: None },
+        4 | 5 => HitansLayout { prefix: 3, stride: 22, zka_name: Some(3), name: 5, needs_tan_medium: Some(20), decoupled: None },
+        6 => HitansLayout { prefix: 3, stride: 21, zka_name: Some(3), name: 5, needs_tan_medium: Some(18), decoupled: None },
+        // v7 and anything newer we don't know yet: v7 layout is the best guess.
+        _ => HitansLayout { prefix: 3, stride: 26, zka_name: Some(3), name: 5, needs_tan_medium: Some(18), decoupled: Some(21) },
+    }
+}
+
+/// Parse TAN methods from a HITANS segment.
+///
+/// Wire layout: `HITANS:n:v:ref+maxjobs+minsigs+secclass+<ParTAN2Step>` where
+/// ParTAN2Step is ONE data element group: a short prefix followed by one
+/// fixed-size group of DEs per TAN method, all colon-separated.
 pub(crate) fn parse_hitans(seg: &RawSegment) -> Vec<TanMethod> {
     let version = seg.segment_version();
+    let layout = hitans_layout(version);
+    let par = seg.deg(4);
     let mut methods = Vec::new();
 
-    // HITANS structure varies by version but the TAN parameters start at DEG 4+
-    // DEG 1 = header, DEG 2 = max one-step jobs, DEG 3 = security class,
-    // DEG 4+ = two-step parameters (one DEG per method)
-    for i in 4..seg.deg_count() {
-        let d = seg.deg(i);
-        if d.len() < 3 {
-            continue;
-        }
-
-        let security_function = d.get_str(0);
+    let mut start = layout.prefix;
+    while start < par.len() {
+        let field = |i: usize| par.get_str(start + i);
+        let security_function = field(0);
         if security_function.is_empty() {
+            start += layout.stride;
             continue;
         }
 
-        let tan_process = d.get_str(1);
-        // Name is at different positions depending on version
-        let name = if version >= 6 {
-            d.get_str(3) // Index 3 for v6/v7
-        } else {
-            d.get_str(2) // Index 2 for older versions
-        };
+        let zka_name = layout.zka_name.map(field).filter(|s| !s.is_empty());
+        let name = field(layout.name);
+        let needs_tan_medium = layout.needs_tan_medium.map(field).as_deref() == Some("2");
 
-        let needs_tan_medium = if version >= 6 && d.len() > 13 {
-            let val = d.get_str(13);
-            val == "2" || val == "1" // 2 = required, 1 = allowed
-        } else {
-            false
-        };
-
-        // Decoupled parameters (v7 only, high indices)
-        let (is_decoupled, max_polls, wait_first, wait_next) = if version >= 7 && d.len() > 24 {
-            let decoupled = d.get_str(21) == "J";
-            let max_p = d.get_str(22).parse::<i32>().unwrap_or(-1);
-            let wf = d.get_str(23).parse::<i32>().unwrap_or(0);
-            let wn = d.get_str(24).parse::<i32>().unwrap_or(0);
-            (decoupled, max_p, wf, wn)
-        } else {
-            (false, -1, 0, 0)
-        };
-
-        let display_name = if name.is_empty() {
-            format!("TAN-{}", &security_function)
-        } else {
-            name
-        };
+        let (mut max_polls, mut wait_first, mut wait_next, mut auto_polling) = (-1, 0, 0, None);
+        let mut has_decoupled_fields = false;
+        if let Some(d) = layout.decoupled {
+            let num = |i: usize| field(d + i).parse::<i32>().ok();
+            if let Some(v) = num(0) { max_polls = v; has_decoupled_fields = true; }
+            if let Some(v) = num(1) { wait_first = v; has_decoupled_fields = true; }
+            if let Some(v) = num(2) { wait_next = v; has_decoupled_fields = true; }
+            auto_polling = match field(d + 4).as_str() {
+                "J" => Some(true),
+                "N" => Some(false),
+                _ => None,
+            };
+        }
+        // hbci4java (HHDVersion.DECOUPLED) keys on the DK method name "Decoupled*";
+        // the v7 decoupled timing fields are only filled for decoupled methods.
+        let is_decoupled = version >= 7
+            && (zka_name.as_deref().is_some_and(|z| z.to_ascii_lowercase().starts_with("decouple"))
+                || has_decoupled_fields);
 
         methods.push(TanMethod {
+            name: if name.is_empty() { format!("TAN-{}", security_function) } else { name },
             security_function: SecurityFunction::new(security_function),
-            tan_process: TanProcess::from_str_val(&tan_process),
-            name: display_name,
+            tan_process: TanProcess::from_str_val(&field(1)),
             needs_tan_medium,
             decoupled_max_polls: max_polls,
             wait_before_first_poll: wait_first,
             wait_before_next_poll: wait_next,
             is_decoupled,
             hktan_version: version,
+            zka_name,
+            decoupled_auto_polling: auto_polling,
         });
+        start += layout.stride;
     }
 
     methods
 }
 
+/// Parsed HITAN (TAN challenge response).
+#[derive(Debug, Clone, Default, PartialEq)]
+pub(crate) struct Hitan {
+    pub task_reference: String,
+    pub challenge: String,
+    pub challenge_hhduc: Option<Vec<u8>>,
+}
+
 /// Parse HITAN (TAN challenge response) — extracts challenge and task reference.
-pub(crate) fn parse_hitan(seg: &RawSegment) -> (String, String, Option<Vec<u8>>) {
-    let version = seg.segment_version();
-
-    // HITAN structure:
-    // v6/v7: DEG1=header, DEG2=tan_process, DEG3=order_hash, DEG4=task_ref, DEG5=challenge, DEG6=challenge_hhduc, DEG7=validity
-    // v3-5: slightly different layout
-    let (task_ref, challenge, challenge_hhduc) = if version >= 6 {
-        let task_ref = read_str(seg, 2, 0); // DEG 2 = task reference (or order_reference)
-                                            // In some bank implementations, the structure varies.
-                                            // We search for the task reference and challenge text in a pragmatic way.
-        let task_reference = if task_ref.is_empty() {
-            read_str(seg, 3, 0)
-        } else {
-            task_ref
-        };
-        let challenge = read_str(seg, 4, 0);
-        let challenge_text = if challenge.is_empty() {
-            read_str(seg, 3, 0)
-        } else {
-            challenge
-        };
-        let hhduc = read_binary(seg, 5, 0);
-        (task_reference, challenge_text, hhduc)
-    } else {
-        let task_ref = read_str(seg, 2, 0);
-        let challenge = read_str(seg, 3, 0);
-        (task_ref, challenge, None)
-    };
-
-    (task_ref, challenge, challenge_hhduc)
+///
+/// Layout (TAN2StepRes5–7): `HITAN:n:v:ref+process+orderhash+orderref+challenge+challenge_hhd_uc+...`
+/// The challenge may be the literal "nochallenge" (hbci4java ignores it), which
+/// we report as an empty challenge.
+pub(crate) fn parse_hitan(seg: &RawSegment) -> Hitan {
+    let task_reference = read_str(seg, 3, 0);
+    let mut challenge = read_str(seg, 4, 0);
+    if challenge == "nochallenge" {
+        challenge.clear();
+    }
+    let challenge_hhduc = read_binary(seg, 5, 0).filter(|b| !b.is_empty());
+    Hitan { task_reference, challenge, challenge_hhduc }
 }
 
 /// Parse HITAB (TAN media list response).
@@ -234,7 +247,13 @@ pub(crate) fn parse_hiupd(seg: &RawSegment) -> Option<SepaAccount> {
 
     // IBAN and BIC might be at the end of the segment or in specific positions.
     // Some banks put IBAN at DEG index ~10+, so we scan all DEGs heuristically.
-    let mut iban = String::new();
+    // HIUPD v6 (KInfo6) carries the IBAN in DEG 2. Older versions and some
+    // banks don't, so fall back to scanning for anything IBAN-shaped.
+    let mut iban = if seg.segment_version() >= 6 && looks_like_iban(&read_str(seg, 2, 0)) {
+        read_str(seg, 2, 0)
+    } else {
+        String::new()
+    };
     let mut bic = String::new();
 
     for i in 1..seg.deg_count() {
@@ -600,8 +619,10 @@ pub(crate) fn parse_hibpa_version(seg: &RawSegment) -> u16 {
 }
 
 /// Parse HIUPA (User Parameter Data header) — extracts UPD version.
+///
+/// Layout (UPA2–4): `HIUPA:n:v:ref+userid+version+usage[+username[+userdata]]`.
 pub(crate) fn parse_hiupa_version(seg: &RawSegment) -> u16 {
-    read_u16(seg, 3, 0)
+    read_u16(seg, 2, 0)
 }
 
 /// Parse HISYN (Synchronization response) — extracts the assigned system ID.
@@ -731,14 +752,131 @@ mod tests {
 
     #[test]
     fn test_parse_hiupa_version() {
+        // HIUPA: userid + UPD version + UPD usage (UPA4 in hbci-300.xml)
         let seg = parse_segment("HIUPA:6:4:4+test1+7+0'");
-        assert_eq!(parse_hiupa_version(&seg), 0); // version is at DEG 3 index 0
+        assert_eq!(parse_hiupa_version(&seg), 7);
     }
 
     #[test]
     fn test_parse_hisyn_system_id() {
         let seg = parse_segment("HISYN:173:4:6+MYSYSID123'");
         assert_eq!(parse_hisyn_system_id(&seg), "MYSYSID123");
+    }
+
+    // ── HITANS / HITAN (TAN2StepPar*, TAN2StepRes*) ───────────────────
+
+    /// One HITANS v7 method group (26 DEs, TAN2StepParams7).
+    fn hitans7_method(sf: &str, zka: &str, name: &str, medium: &str, decoupled: [&str; 5]) -> String {
+        let mut f: Vec<&str> = vec![
+            sf, "2", "id", zka, "", name, "", "", "Freigabe", "2048", "N", "2", "N", "0", "0",
+            "N", "N", "00", medium, "N", "1",
+        ];
+        f.extend_from_slice(&decoupled);
+        assert_eq!(f.len(), 26);
+        f.join(":")
+    }
+
+    #[test]
+    fn test_parse_hitans_v7_decoupled_and_classic() {
+        let raw = format!(
+            "HITANS:170:7:4+1+1+1+N:N:0:{}:{}'",
+            hitans7_method("902", "Decoupled", "pushTAN 2.0", "2", ["180", "3", "2", "J", "J"]),
+            hitans7_method("912", "HHD", "chipTAN", "0", ["", "", "", "", ""]),
+        );
+        let methods = parse_hitans(&parse_segment(&raw));
+        assert_eq!(methods.len(), 2);
+
+        let push = &methods[0];
+        assert_eq!(push.security_function.as_str(), "902");
+        assert_eq!(push.name, "pushTAN 2.0");
+        assert_eq!(push.zka_name.as_deref(), Some("Decoupled"));
+        assert!(push.is_decoupled);
+        assert!(push.needs_tan_medium);
+        assert_eq!(push.decoupled_max_polls, 180);
+        assert_eq!(push.wait_before_first_poll, 3);
+        assert_eq!(push.wait_before_next_poll, 2);
+        assert_eq!(push.decoupled_auto_polling, Some(true));
+        assert_eq!(push.hktan_version, 7);
+
+        let chip = &methods[1];
+        assert_eq!(chip.security_function.as_str(), "912");
+        assert!(!chip.is_decoupled);
+        assert!(!chip.needs_tan_medium);
+        assert_eq!(chip.decoupled_max_polls, -1);
+    }
+
+    #[test]
+    fn test_parse_hitans_v7_zero_max_polls_means_unlimited() {
+        let raw = format!(
+            "HITANS:170:7:4+1+1+1+J:N:0:{}'",
+            hitans7_method("940", "DecoupledPush", "App", "1", ["0", "5", "5", "N", "N"]),
+        );
+        let m = &parse_hitans(&parse_segment(&raw))[0];
+        assert!(m.is_decoupled);
+        assert_eq!(m.decoupled_max_polls, 0);
+        assert_eq!(m.decoupled_auto_polling, Some(false));
+        assert!(!m.needs_tan_medium, "1 = optional, not required");
+    }
+
+    #[test]
+    fn test_parse_hitans_v6() {
+        // Two TAN2StepParams6 groups of 21 DEs.
+        let raw = "HITANS:169:6:4+1+1+1+J:N:0:\
+            910:2:HHD1.3.0:HHD:1.3.0:chipTAN manuell:6:1:TAN-Nummer:3:J:2:N:0:0:N:N:00:0:N:1:\
+            911:2:HHD1.3.2OPT:HHDOPT1:1.3.2:chipTAN optisch:6:1:TAN-Nummer:3:J:2:N:0:0:N:N:00:2:N:1'";
+        let methods = parse_hitans(&parse_segment(raw));
+        let sfs: Vec<_> = methods.iter().map(|m| m.security_function.as_str()).collect();
+        assert_eq!(sfs, ["910", "911"]);
+        assert_eq!(methods[1].name, "chipTAN optisch");
+        assert!(!methods[0].needs_tan_medium);
+        assert!(methods[1].needs_tan_medium);
+        assert!(methods.iter().all(|m| !m.is_decoupled && m.hktan_version == 6));
+    }
+
+    #[test]
+    fn test_parse_hitans_v5_python_fints_fixture() {
+        // Fixture from python-fints' conftest (22 DEs per method).
+        let raw = "HITANS:53:5:4+1+1+1+J:N:0:942:2:MTAN2:mobileTAN::mobile TAN:6:1:SMS:3:1:J:1:0:N:0:2:N:J:00:1:1:962:2:HHD1.4:HHD:1.4:Smart-TAN plus manuell:6:1:Challenge:3:1:J:1:0:N:0:2:N:J:00:1:1:972:2:HHD1.4OPT:HHDOPT1:1.4:Smart-TAN plus optisch:6:1:Challenge:3:1:J:1:0:N:0:2:N:J:00:1:1'";
+        let methods = parse_hitans(&parse_segment(raw));
+        let names: Vec<_> = methods.iter().map(|m| (m.security_function.as_str(), m.name.as_str())).collect();
+        assert_eq!(names, [("942", "mobile TAN"), ("962", "Smart-TAN plus manuell"), ("972", "Smart-TAN plus optisch")]);
+    }
+
+    #[test]
+    fn test_parse_hitans_garbage_does_not_panic() {
+        for raw in ["HITANS:1:7:4'", "HITANS:1:7:4+1+1+1+J'", "HITANS:1:99:4+1+1+1+J:N:0:900'", "HITANS:1:1:4+x'"] {
+            let _ = parse_hitans(&parse_segment(raw));
+        }
+    }
+
+    #[test]
+    fn test_parse_hitan_v7() {
+        let seg = parse_segment("HITAN:5:7:4+4++4711-REF+Bitte bestaetigen Sie in der App'");
+        let h = parse_hitan(&seg);
+        assert_eq!(h.task_reference, "4711-REF");
+        assert_eq!(h.challenge, "Bitte bestaetigen Sie in der App");
+        assert!(h.challenge_hhduc.is_none());
+    }
+
+    #[test]
+    fn test_parse_hitan_with_order_hash_and_nochallenge() {
+        // A filled order hash must not be mistaken for the task reference.
+        let seg = parse_segment("HITAN:5:6:4+S+@4@HASH+REF-9+nochallenge'");
+        let h = parse_hitan(&seg);
+        assert_eq!(h.task_reference, "REF-9");
+        assert_eq!(h.challenge, "");
+    }
+
+    #[test]
+    fn test_parse_hiupd_v6_iban_and_names() {
+        let seg = parse_segment("HIUPD:58:6:4+1::280:12345678+DE111234567800000001+test1++EUR+Fullname++Girokonto++HKSAL:1+HKKAZ:1'");
+        let acc = parse_hiupd(&seg).unwrap();
+        assert_eq!(acc.iban.as_str(), "DE111234567800000001");
+        assert_eq!(acc.account_number, "1");
+        assert_eq!(acc.blz.as_str(), "12345678");
+        assert_eq!(acc.owner.as_deref(), Some("Fullname"));
+        assert_eq!(acc.product_name.as_deref(), Some("Girokonto"));
+        assert_eq!(acc.currency.as_ref().map(|c| c.as_str()), Some("EUR"));
     }
 
     // ── Response code helpers ──────────────────────────────────────────

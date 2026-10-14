@@ -543,16 +543,24 @@ pub struct TanMethod {
     pub name: String,
     /// Whether TAN medium name must be sent
     pub needs_tan_medium: bool,
-    /// Maximum number of decoupled polls (-1 = unlimited)
+    /// Maximum number of decoupled status polls (HKTAN process S).
+    /// `0` = unlimited (per spec), `-1` = not provided by the bank.
     pub decoupled_max_polls: i32,
-    /// Seconds to wait before first decoupled poll
+    /// Seconds to wait before first decoupled poll (0 = not provided)
     pub wait_before_first_poll: i32,
-    /// Seconds to wait between decoupled polls
+    /// Seconds to wait between decoupled polls (0 = not provided)
     pub wait_before_next_poll: i32,
     /// Whether this is a decoupled method
     pub is_decoupled: bool,
-    /// HKTAN version
+    /// HKTAN version (= version of the HITANS segment that announced this method)
     pub hktan_version: u16,
+    /// DK TAN method identifier (formerly "ZKA TAN-Verfahren"), e.g. "Decoupled" or "HHD".
+    #[serde(default)]
+    pub zka_name: Option<String>,
+    /// Whether the bank allows automated decoupled status polling (HITANS v7).
+    /// `Some(false)` means the user should confirm manually in the client before we poll.
+    #[serde(default)]
+    pub decoupled_auto_polling: Option<bool>,
 }
 
 /// SEPA account info as returned by HISPA / HIUPD.
