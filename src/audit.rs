@@ -246,7 +246,8 @@ fn check_hnhbk_rules(segments: &[RawSegment], ctx: &mut AuditContext) {
             Some("HNHBK"),
         );
     }
-    if segments[0].segment_type() != "HNHBK" {
+    let Some(hnhbk) = segments.first() else { return };
+    if hnhbk.segment_type() != "HNHBK" {
         ctx.add(
             ViolationSeverity::Error,
             "HNHBK-001",
@@ -254,8 +255,6 @@ fn check_hnhbk_rules(segments: &[RawSegment], ctx: &mut AuditContext) {
             Some("HNHBK"),
         );
     }
-
-    let hnhbk = &segments[0];
 
     // HNHBK-002: Size field must be >= 50.
     let size_str = hnhbk.deg(1).get_str(0);
@@ -345,33 +344,28 @@ fn check_hnvsk_rules(segments: &[RawSegment], ctx: &mut AuditContext) {
 
 /// HNVSD-001, HNVSD-002, and inner segment rules.
 fn check_hnvsd_rules(segments: &[RawSegment], ctx: &mut AuditContext, is_client: bool) {
-    let hnvsd = segments.iter().find(|s| s.segment_type() == "HNVSD");
-    match hnvsd {
-        None => {
-            ctx.add(
-                ViolationSeverity::Error,
-                "HNVSD-001",
-                "No HNVSD segment found",
-                Some("HNVSD"),
-            );
-            return;
-        }
-        Some(seg) if seg.segment_number() != 999 => {
-            ctx.add(
-                ViolationSeverity::Error,
-                "HNVSD-001",
-                &format!(
-                    "HNVSD segment number is {} (must be 999)",
-                    seg.segment_number()
-                ),
-                Some("HNVSD"),
-            );
-        }
-        _ => {}
+    let Some(hnvsd) = segments.iter().find(|s| s.segment_type() == "HNVSD") else {
+        ctx.add(
+            ViolationSeverity::Error,
+            "HNVSD-001",
+            "No HNVSD segment found",
+            Some("HNVSD"),
+        );
+        return;
+    };
+    if hnvsd.segment_number() != 999 {
+        ctx.add(
+            ViolationSeverity::Error,
+            "HNVSD-001",
+            &format!(
+                "HNVSD segment number is {} (must be 999)",
+                hnvsd.segment_number()
+            ),
+            Some("HNVSD"),
+        );
     }
 
     // HNVSD-002: payload must be parseable.
-    let hnvsd = hnvsd.unwrap();
     let payload_opt = hnvsd.deg(1).get(0).as_bytes().map(|b| b.to_vec());
     match payload_opt {
         None => {

@@ -8,7 +8,7 @@ use std::io::BufRead;
 use std::process::{Child, Command, Stdio};
 
 use fints::protocol::{Account, BalanceResult};
-use fints::{bank_ops, bank_ops_with_config, AnyBank, BankConfig, BankOps, Dkb, FetchOpts, Flow, Pin, ProductId, UserId};
+use fints::{bank_ops, bank_ops_with_config, AnyBank, BankConfig, BankOps, Dkb, FetchOpts, Flow, Ing, Pin, ProductId, SessionState, UserId};
 
 // ═══════════════════════════════════════════════════════════════════════════
 // Mock server helper
@@ -97,6 +97,17 @@ fn bank_ops_dispatch_dkb_blz() {
     let bank = bank_ops("12030000").expect("DKB BLZ should resolve");
     assert!(matches!(bank, AnyBank::Dkb(_)), "BLZ 12030000 must map to Dkb");
     assert_eq!(bank.config().blz.as_str(), "12030000");
+}
+
+#[test]
+fn bank_ops_dispatch_ing_blz() {
+    let bank = bank_ops("50010517").expect("ING BLZ should resolve");
+    assert!(matches!(bank, AnyBank::Ing(_)), "BLZ 50010517 must map to Ing");
+    let c = bank.config();
+    assert_eq!(c.blz.as_str(), Ing::BLZ);
+    assert_eq!(c.bic.as_str(), "INGDDEFFXXX");
+    // Same endpoint as hbci4java's blz.properties.
+    assert_eq!(c.url.as_str(), "https://fints.ing.de/fints/");
 }
 
 #[test]
@@ -368,4 +379,96 @@ async fn generic_bank_direct_balance() {
         }
         fints::InitiateOutcome::NeedTan(_) => panic!("mock should open directly"),
     }
+}
+
+// ═══════════════════════════════════════════════════════════════════════════
+// Session state persistence (mock server)
+// ═══════════════════════════════════════════════════════════════════════════
+
+#[tokio::test]
+async fn session_state_skips_sync_and_keeps_system_id() {
+    let (child, port) = match spawn_mock_server() {
+        Some(v) => v,
+        None => { eprintln!("Skipping: python3 not available"); return; }
+    };
+    let _guard = MockServerGuard(child);
+    let (user, pin, product) = test_credentials();
+
+    // First run: full sync.
+    let (flow, _) = Flow::initiate_with_bank(mock_any_bank(port), &user, &pin, &product, None, None, None)
+        .await.expect("first initiate");
+    let first = flow.finish().await.expect("finish");
+    assert!(first.system_id.is_assigned());
+    assert_eq!((first.bpd_version, first.upd_version), (78, 3), "cached versions from HIBPA/HIUPA");
+    assert!(first.can_skip_sync());
+    assert_eq!(first.accounts().len(), 2);
+
+    // Persist and restore like the dashboard would.
+    let restored = SessionState::from_json(&first.to_json().unwrap()).unwrap();
+
+    // Second run: no HKSYN, so the mock can't hand out a new system ID.
+    let (flow, info) = Flow::initiate_with_bank(mock_any_bank(port), &user, &pin, &product, Some(&restored), None, None)
+        .await.expect("second initiate");
+    assert!(!info.tan_methods.is_empty(), "TAN methods come from the cached BPD");
+    let second = flow.finish().await.expect("finish");
+    assert_eq!(second.system_id, first.system_id, "system ID must stay stable across runs");
+    assert_eq!((second.bpd_version, second.upd_version), (78, 3));
+    assert_eq!(second.accounts().len(), 2, "UPD kept although the bank didn't resend it");
+}
+
+#[tokio::test]
+async fn session_state_for_other_user_is_ignored() {
+    let (child, port) = match spawn_mock_server() {
+        Some(v) => v,
+        None => { eprintln!("Skipping: python3 not available"); return; }
+    };
+    let _guard = MockServerGuard(child);
+    let (user, pin, product) = test_credentials();
+
+    let foreign = SessionState::new(&fints::Blz::new("12345678"), &UserId::new("someone-else"))
+        .with_system_id(&fints::SystemId::new("FOREIGN"));
+    let (flow, _) = Flow::initiate_with_bank(mock_any_bank(port), &user, &pin, &product, Some(&foreign), None, None)
+        .await.expect("initiate");
+    let state = flow.finish().await.unwrap();
+    assert_ne!(state.system_id.as_str(), "FOREIGN");
+    assert_eq!(state.user_id, user);
+}
+
+#[tokio::test]
+async fn flow_fetches_several_accounts_in_one_dialog() {
+    let (child, port) = match spawn_mock_server() {
+        Some(v) => v,
+        None => { eprintln!("Skipping: python3 not available"); return; }
+    };
+    let _guard = MockServerGuard(child);
+    let (user, pin, product) = test_credentials();
+
+    let (mut flow, info) = Flow::initiate_with_bank(mock_any_bank(port), &user, &pin, &product, None, None, None)
+        .await.expect("initiate");
+    assert!(info.no_tan_required, "mock grants SCA exemption");
+    let accounts: Vec<_> = flow.accounts().to_vec();
+    assert_eq!(accounts.len(), 2);
+    for acc in &accounts {
+        let account = Account::from_sepa(acc, "GENODE23X42").unwrap();
+        let result = flow.fetch(&account, &FetchOpts::no_holdings(30)).await.expect("fetch");
+        assert!(result.balance.is_some(), "balance for {}", acc.iban);
+    }
+    let state = flow.finish().await.unwrap();
+    assert!(state.system_id.is_assigned());
+}
+
+/// Compile-time check: a Flow and its futures can run in a background task
+/// (`tokio::spawn` needs `Send`), which is how a dashboard should drive pushTAN.
+#[allow(dead_code)]
+fn flow_futures_are_send() {
+    fn is_send<T: Send>(_: T) {}
+    async fn run(mut flow: Flow) {
+        let _ = flow
+            .await_decoupled(fints::CancellationToken::new(), &fints::DecoupledOptions::default(), |_| {})
+            .await;
+        let account = Account::new("DE89370400440532013000", "COBADEFFXXX").unwrap();
+        let _ = flow.fetch(&account, &FetchOpts::all(30)).await;
+        let _ = flow.finish().await;
+    }
+    let _ = |flow: Flow| is_send(run(flow));
 }

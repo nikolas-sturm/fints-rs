@@ -30,7 +30,9 @@ pub enum FinTSError {
     #[error("TAN timeout: user did not confirm within the allowed time")]
     TanTimeout,
 
-    #[error("Bank error ({kind:?}): {message}")]
+    /// Any 9xxx code the bank returned, including ones we don't know:
+    /// carries the code and the bank's own text.
+    #[error("Bank error {}: {message}", kind.code())]
     BankError {
         kind: crate::types::ResponseCodeKind,
         message: String,
@@ -50,6 +52,18 @@ pub enum FinTSError {
 
     #[error("Account locked")]
     AccountLocked,
+
+    /// The bank rejected the system ID (9391); a fresh synchronization is needed.
+    #[error("System ID rejected by bank: {0}")]
+    SystemIdInvalid(String),
+
+    /// The bank reported more decoupled status requests than it allows.
+    #[error("Decoupled TAN: bank's maximum of {0} status requests reached")]
+    DecoupledMaxPolls(u32),
+
+    /// The caller cancelled a pending operation (e.g. decoupled TAN polling).
+    #[error("Cancelled")]
+    Cancelled,
 
     #[error("IO error: {0}")]
     Io(#[from] std::io::Error),

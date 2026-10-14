@@ -11,6 +11,7 @@ use tracing::{info, warn};
 use crate::banks::BankConfig;
 use crate::error::{FinTSError, Result};
 use crate::protocol::*;
+use crate::session::SessionState;
 use crate::types::*;
 
 // ═══════════════════════════════════════════════════════════════════════════════
@@ -103,13 +104,16 @@ pub trait BankOps: Send + Sync {
         Dialog::new(c.url.as_str(), &c.blz, username, pin, product_id)
     }
 
-    /// Phase 1: sync + init, return TAN challenge or authenticated dialog.
+    /// Phase 1: [sync +] init, return TAN challenge or authenticated dialog.
+    ///
+    /// With a `session` that holds a system ID and BPD, the synchronization
+    /// dialog is skipped and HKVVB announces the cached BPD/UPD versions.
     fn initiate(
         &self,
         username: &UserId,
         pin: &Pin,
         product_id: &ProductId,
-        system_id: Option<&SystemId>,
+        session: Option<&SessionState>,
         target_iban: Option<&Iban>,
         target_bic: Option<&Bic>,
     ) -> impl std::future::Future<Output = Result<InitiateOutcome>> + Send;
@@ -134,6 +138,263 @@ pub trait BankOps: Send + Sync {
 }
 
 // ═══════════════════════════════════════════════════════════════════════════════
+// Shared dialog setup
+// ═══════════════════════════════════════════════════════════════════════════════
+
+/// The standard PIN/TAN dialog setup every bank uses unless it needs
+/// something special:
+///
+/// ```text
+///   [Sync dialog — skipped when the session has a system ID and BPD]
+///     HKIDN + HKVVB + HKSYN  → BPD, UPD, system ID;  HKEND
+///   Business dialog
+///     HKIDN + HKVVB(cached BPD/UPD versions) + HKTAN:4(ref=HKIDN)
+///       → 0030/3955: TAN required (decoupled: confirm in app)
+///       → 3076:      SCA exemption, dialog open
+/// ```
+///
+/// If the bank rejects a cached system ID (9391), the session is discarded
+/// and the setup runs once more with a full synchronization.
+pub async fn initiate_default<B: BankOps + ?Sized>(
+    bank: &B,
+    username: &UserId,
+    pin: &Pin,
+    product_id: &ProductId,
+    session: Option<&SessionState>,
+) -> Result<InitiateOutcome> {
+    let config = bank.config();
+    let session = session.filter(|s| {
+        let matches = s.blz == config.blz && &s.user_id == username;
+        if !matches {
+            warn!("[FinTS] Ignoring session state for {}/{} (dialog is {}/{})", s.blz, s.user_id, config.blz, username);
+        }
+        matches
+    });
+
+    match initiate_once(bank, username, pin, product_id, session).await {
+        Err(FinTSError::SystemIdInvalid(msg)) if session.is_some_and(|s| s.system_id.is_assigned()) => {
+            warn!("[FinTS] Bank rejected cached system ID ({}); re-synchronizing", msg);
+            initiate_once(bank, username, pin, product_id, None).await
+        }
+        other => other,
+    }
+}
+
+async fn initiate_once<B: BankOps + ?Sized>(
+    bank: &B,
+    username: &UserId,
+    pin: &Pin,
+    product_id: &ProductId,
+    session: Option<&SessionState>,
+) -> Result<InitiateOutcome> {
+    let (mut params, sys_id) = match session {
+        Some(s) if s.can_skip_sync() => {
+            info!("[FinTS] Using cached BPD v{} / UPD v{} and system ID — skipping sync dialog",
+                s.bpd_version, s.upd_version);
+            (s.to_params(), s.system_id.clone())
+        }
+        _ => {
+            let mut sync_dialog = bank.new_dialog(username, pin, product_id)?;
+            if let Some(sid) = session.map(|s| &s.system_id).filter(|s| s.is_assigned()) {
+                sync_dialog = sync_dialog.with_system_id(sid);
+            }
+            let (synced, _) = sync_dialog.sync().await?;
+            let (params, sys_id) = synced.end().await?;
+            let sys_id = if sys_id.is_assigned() {
+                sys_id
+            } else {
+                session.map(|s| s.system_id.clone()).unwrap_or_else(SystemId::unassigned)
+            };
+            (params, sys_id)
+        }
+    };
+    // TAN preferences from the session apply whether or not we synced.
+    if let Some(s) = session {
+        if s.tan_method.is_some() {
+            params.preferred_security_function = s.tan_method.clone();
+        }
+        if s.tan_medium.is_some() {
+            params.selected_tan_medium = s.tan_medium.clone();
+        }
+        params.select_security_function();
+    }
+    let tan_methods = params.tan_methods.clone();
+    let allowed = params.allowed_security_functions.clone();
+
+    let dialog = bank.new_dialog(username, pin, product_id)?
+        .with_system_id(&sys_id)
+        .with_params(&params);
+
+    match dialog.init().await? {
+        InitResult::TanRequired(tan_pending, challenge, _resp) => {
+            let challenge = TanChallenge {
+                decoupled: challenge.decoupled || tan_pending.bank_params().is_decoupled(),
+                ..challenge
+            };
+            info!("[{}] TAN required: decoupled={}, task_ref='{}'",
+                bank.config().name, challenge.decoupled, challenge.task_reference);
+            Ok(InitiateOutcome::NeedTan(InitiateResult {
+                params: tan_pending.bank_params().clone(),
+                system_id: tan_pending.system_id().clone(),
+                dialog: tan_pending,
+                challenge,
+                tan_methods,
+                allowed_security_functions: allowed,
+                no_tan_required: false,
+            }))
+        }
+        InitResult::Opened(open, _resp) => {
+            info!("[{}] Dialog opened without TAN (SCA exemption)", bank.config().name);
+            Ok(InitiateOutcome::Authenticated(InitiateNoTanResult {
+                params: open.bank_params().clone(),
+                system_id: open.system_id().clone(),
+                dialog: open,
+                tan_methods,
+                allowed_security_functions: allowed,
+            }))
+        }
+    }
+}
+
+/// Fetch balance, transactions (all touchdown pages) and holdings from an
+/// open dialog. Balance and holdings are best-effort; transaction errors fail.
+pub async fn fetch_default(
+    tag: &str,
+    dialog: &mut Dialog<Open>,
+    account: &Account,
+    days: u32,
+) -> Result<FetchResult> {
+    info!("[{}] Fetching IBAN={}, BIC={}", tag, account.iban(), account.bic());
+
+    // ── Balance (HKSAL) ──
+    let balance = match dialog.balance(account).await {
+        Ok(BalanceResult::Success(b)) => {
+            info!("[{}] Balance: {}", tag, b.amount);
+            Some(b)
+        }
+        Ok(BalanceResult::NeedTan(_)) => {
+            warn!("[{}] Balance requires additional TAN — skipping", tag);
+            None
+        }
+        Ok(BalanceResult::Empty) => {
+            warn!("[{}] No balance data in response", tag);
+            None
+        }
+        Err(e) => {
+            warn!("[{}] Balance failed: {}", tag, e);
+            None
+        }
+    };
+
+    let transactions = fetch_transactions(tag, dialog, account, days).await?;
+
+    // ── Holdings (HKWPD) — best-effort, non-fatal ──
+    let holdings = match fetch_holdings_default(tag, dialog, account).await {
+        Ok(h) => h,
+        Err(e) => {
+            warn!("[{}] Holdings fetch failed (non-fatal): {}", tag, e);
+            Vec::new()
+        }
+    };
+
+    Ok(FetchResult { balance, transactions, holdings })
+}
+
+/// Fetch and parse all transaction pages (HKKAZ with touchdown pagination).
+pub async fn fetch_transactions(
+    tag: &str,
+    dialog: &mut Dialog<Open>,
+    account: &Account,
+    days: u32,
+) -> Result<Vec<Transaction>> {
+    let end_date = chrono::Local::now().date_naive();
+    let start_date = end_date - chrono::Duration::days(days.max(1) as i64);
+    info!("[{}] Transactions {} to {}", tag, start_date, end_date);
+
+    let mut all_booked = Mt940Data::new();
+    let mut all_pending = Mt940Data::new();
+    let mut touchdown: Option<TouchdownPoint> = None;
+    let mut pages = 0u32;
+
+    loop {
+        match dialog.transactions(account, start_date, end_date, touchdown.as_ref()).await? {
+            TransactionResult::NeedTan(_) => {
+                return Err(FinTSError::Dialog(format!(
+                    "{tag}: the bank requires an additional TAN for transactions"
+                )));
+            }
+            TransactionResult::Success(page) => {
+                pages += 1;
+                if !page.booked.is_empty() { all_booked.extend(page.booked.0); }
+                if !page.pending.is_empty() { all_pending.extend(page.pending.0); }
+                match page.touchdown {
+                    // A bank repeating the same touchdown point would loop forever.
+                    Some(td) if Some(&td) == touchdown.as_ref() => {
+                        warn!("[{}] Bank repeated touchdown point {} — stopping", tag, td);
+                        break;
+                    }
+                    Some(td) => {
+                        info!("[{}] Touchdown {} (page {}): more data...", tag, td, pages);
+                        touchdown = Some(td);
+                    }
+                    None => break,
+                }
+            }
+        }
+    }
+
+    let mut transactions = parse_mt940(all_booked.as_bytes(), TransactionStatus::Booked)?;
+    if !all_pending.is_empty() {
+        transactions.extend(parse_mt940(all_pending.as_bytes(), TransactionStatus::Pending)?);
+    }
+    info!("[{}] {} transactions in {} page(s)", tag, transactions.len(), pages);
+    Ok(transactions)
+}
+
+/// Fetch all holdings pages (HKWPD). A depot the bank doesn't offer, or an
+/// account that can't be addressed as a depot, yields an empty list.
+pub async fn fetch_holdings_default(
+    tag: &str,
+    dialog: &mut Dialog<Open>,
+    account: &Account,
+) -> Result<Vec<SecurityHolding>> {
+    info!("[{}] Fetching holdings for {}", tag, account.account_number().unwrap_or(account.iban()));
+
+    let mut all_holdings = Vec::new();
+    let mut touchdown: Option<TouchdownPoint> = None;
+
+    loop {
+        let result = match dialog.holdings(account, None, touchdown.as_ref()).await {
+            Ok(r) => r,
+            Err(FinTSError::SegmentNotSupported(why)) if all_holdings.is_empty() => {
+                info!("[{}] Holdings not available: {}", tag, why);
+                return Ok(all_holdings);
+            }
+            Err(e) => return Err(e),
+        };
+
+        match result {
+            HoldingsResult::NeedTan(_) => {
+                warn!("[{}] Holdings requires additional TAN — skipping", tag);
+                return Ok(all_holdings);
+            }
+            HoldingsResult::Empty => break,
+            HoldingsResult::Success(page) => {
+                all_holdings.extend(page.holdings);
+                match page.touchdown {
+                    Some(td) if Some(&td) == touchdown.as_ref() => break,
+                    Some(td) => touchdown = Some(td),
+                    None => break,
+                }
+            }
+        }
+    }
+
+    info!("[{}] {} holdings", tag, all_holdings.len());
+    Ok(all_holdings)
+}
+
+// ═══════════════════════════════════════════════════════════════════════════════
 // DKB implementation
 // ═══════════════════════════════════════════════════════════════════════════════
 
@@ -141,7 +402,7 @@ pub trait BankOps: Send + Sync {
 ///
 /// DKB message flow per spec + empirical discovery:
 /// ```text
-///   Sync dialog:
+///   Sync dialog (skipped with a cached SessionState):
 ///     Msg 1: HKIDN + HKVVB + HKSYN   → BPD, system_id
 ///     Msg 2: HKEND
 ///
@@ -167,10 +428,20 @@ pub struct Dkb {
 impl Dkb {
     pub fn new() -> Self {
         Self {
-            bank: crate::banks::bank_by_blz("12030000")
-                .expect("DKB (BLZ 12030000) must be in bank registry"),
+            bank: crate::banks::bank_by_blz("12030000").unwrap_or_else(|| {
+                BankConfig::new(
+                    "Deutsche Kreditbank Berlin (DKB) AG",
+                    "12030000",
+                    "BYLADEM1001",
+                    "https://fints.dkb.de/fints",
+                )
+            }),
         }
     }
+}
+
+impl Default for Dkb {
+    fn default() -> Self { Self::new() }
 }
 
 impl BankOps for Dkb {
@@ -181,179 +452,93 @@ impl BankOps for Dkb {
         username: &UserId,
         pin: &Pin,
         product_id: &ProductId,
-        system_id: Option<&SystemId>,
+        session: Option<&SessionState>,
         _target_iban: Option<&Iban>,
         _target_bic: Option<&Bic>,
     ) -> Result<InitiateOutcome> {
-        // ── Phase 1: Sync dialog (get system_id + BPD) ──
-        let mut sync_dialog = self.new_dialog(username, pin, product_id)?;
-        if let Some(sid) = system_id {
-            sync_dialog = sync_dialog.with_system_id(sid);
-        }
-        let (synced, _resp) = sync_dialog.sync().await?;
-        let (sync_params, sys_id) = synced.end().await?;
-
-        let sys_id = if sys_id.is_assigned() {
-            sys_id
-        } else {
-            system_id.cloned().unwrap_or_else(SystemId::unassigned)
-        };
-
-        // ── Phase 2: Normal dialog init (triggers TAN or opens directly) ──
-        let dialog = self.new_dialog(username, pin, product_id)?
-            .with_system_id(&sys_id)
-            .with_params(&sync_params);
-
-        let init_result = dialog.init().await?;
-
-        match init_result {
-            InitResult::TanRequired(tan_pending, challenge, _resp) => {
-                info!("[DKB] TAN required: decoupled={}, task_ref='{}'",
-                    challenge.decoupled, challenge.task_reference);
-                Ok(InitiateOutcome::NeedTan(InitiateResult {
-                    params: tan_pending.bank_params().clone(),
-                    system_id: tan_pending.system_id().clone(),
-                    dialog: tan_pending,
-                    challenge,
-                    tan_methods: sync_params.tan_methods.clone(),
-                    allowed_security_functions: sync_params.allowed_security_functions.clone(),
-                    no_tan_required: false,
-                }))
-            }
-            InitResult::Opened(open, _resp) => {
-                info!("[DKB] Opened directly (SCA exemption)");
-                Ok(InitiateOutcome::Authenticated(InitiateNoTanResult {
-                    params: open.bank_params().clone(),
-                    system_id: open.system_id().clone(),
-                    dialog: open,
-                    tan_methods: sync_params.tan_methods.clone(),
-                    allowed_security_functions: sync_params.allowed_security_functions.clone(),
-                }))
-            }
-        }
+        initiate_default(self, username, pin, product_id, session).await
     }
 
-    async fn fetch(
-        &self,
-        dialog: &mut Dialog<Open>,
-        account: &Account,
-        days: u32,
-    ) -> Result<FetchResult> {
-        info!("[DKB] Fetching IBAN={}, BIC={}", account.iban(), account.bic());
-
-        // ── Balance (HKSAL) ──
-        let balance = match dialog.balance(account).await {
-            Ok(BalanceResult::Success(b)) => {
-                info!("[DKB] Balance: {}", b.amount);
-                Some(b)
-            }
-            Ok(BalanceResult::NeedTan(_)) => {
-                warn!("[DKB] Balance requires additional TAN — skipping");
-                None
-            }
-            Ok(BalanceResult::Empty) => {
-                warn!("[DKB] No balance data in response");
-                None
-            }
-            Err(e) => {
-                warn!("[DKB] Balance failed: {}", e);
-                None
-            }
-        };
-
-        // ── Transactions (HKKAZ) with pagination ──
-        let end_date = chrono::Utc::now().date_naive();
-        let start_date = end_date - chrono::Duration::days(days as i64);
-        info!("[DKB] Transactions {} to {}", start_date, end_date);
-
-        let mut all_booked = Mt940Data::new();
-        let mut all_pending = Mt940Data::new();
-        let mut touchdown: Option<TouchdownPoint> = None;
-
-        loop {
-            let result = dialog.transactions(
-                account, start_date, end_date, touchdown.as_ref(),
-            ).await?;
-
-            match result {
-                TransactionResult::NeedTan(_) => {
-                    return Err(FinTSError::Dialog(
-                        "DKB erfordert für Transaktionen eine weitere TAN-Freigabe.".into()
-                    ));
-                }
-                TransactionResult::Success(page) => {
-                    if !page.booked.is_empty() { all_booked.extend(page.booked.0); }
-                    if !page.pending.is_empty() { all_pending.extend(page.pending.0); }
-                    touchdown = page.touchdown;
-                    if touchdown.is_none() { break; }
-                    info!("[DKB] Touchdown: more data...");
-                }
-            }
-        }
-
-        let mut transactions = parse_mt940(all_booked.as_bytes(), TransactionStatus::Booked)?;
-        if !all_pending.is_empty() {
-            transactions.extend(parse_mt940(all_pending.as_bytes(), TransactionStatus::Pending)?);
-        }
-        info!("[DKB] {} transactions", transactions.len());
-
-        // ── Holdings (HKWPD) — best-effort, non-fatal ──
-        let holdings = match self.fetch_holdings(dialog, account).await {
-            Ok(h) => {
-                info!("[DKB] {} holdings", h.len());
-                h
-            }
-            Err(e) => {
-                warn!("[DKB] Holdings fetch failed (non-fatal): {}", e);
-                Vec::new()
-            }
-        };
-
-        Ok(FetchResult { balance, transactions, holdings })
+    async fn fetch(&self, dialog: &mut Dialog<Open>, account: &Account, days: u32) -> Result<FetchResult> {
+        fetch_default("DKB", dialog, account, days).await
     }
 
-    async fn fetch_holdings(
-        &self,
-        dialog: &mut Dialog<Open>,
-        account: &Account,
-    ) -> Result<Vec<SecurityHolding>> {
-        info!("[DKB] Fetching holdings IBAN={}, BIC={}", account.iban(), account.bic());
-
-        let mut all_holdings = Vec::new();
-        let mut touchdown: Option<TouchdownPoint> = None;
-
-        loop {
-            let result = dialog.holdings(
-                account, None, touchdown.as_ref(),
-            ).await?;
-
-            match result {
-                HoldingsResult::NeedTan(_) => {
-                    warn!("[DKB] Holdings requires additional TAN — skipping");
-                    return Ok(all_holdings);
-                }
-                HoldingsResult::Empty => {
-                    info!("[DKB] No holdings data (depot may be empty or not supported)");
-                    break;
-                }
-                HoldingsResult::Success(page) => {
-                    info!("[DKB] Got {} holdings", page.holdings.len());
-                    all_holdings.extend(page.holdings);
-                    touchdown = page.touchdown;
-                    if touchdown.is_none() { break; }
-                    info!("[DKB] Holdings touchdown: more data...");
-                }
-            }
-        }
-
-        info!("[DKB] Total: {} holdings", all_holdings.len());
-        Ok(all_holdings)
+    async fn fetch_holdings(&self, dialog: &mut Dialog<Open>, account: &Account) -> Result<Vec<SecurityHolding>> {
+        fetch_holdings_default("DKB", dialog, account).await
     }
 }
 
 // ═══════════════════════════════════════════════════════════════════════════════
-// Bank registry
+// ING implementation
 // ═══════════════════════════════════════════════════════════════════════════════
+
+/// ING-DiBa (BLZ 50010517) FinTS workflow.
+///
+/// Starts identical to the generic path: overrides get added only once a
+/// captured exchange with the real bank proves the generic flow wrong (see
+/// the fork guide, "Testing against real banks"). Candidates to confirm with
+/// real traffic: the security function used for dialog init (999 vs 900),
+/// whether HKTAN:4 must accompany HKSAL/HKKAZ, and the TAN medium name.
+///
+/// Expected message flow (to be confirmed and updated from real traffic):
+/// ```text
+///   Sync dialog (first run only; cached in SessionState afterwards):
+///     Msg 1: HKIDN + HKVVB + HKSYN            → BPD, UPD, system ID
+///     Msg 2: HKEND
+///
+///   Business dialog:
+///     Msg 1: HKIDN + HKVVB + HKTAN:4(ref=HKIDN)
+///       → 3955 + HITAN: decoupled pushTAN sent to the ING app
+///       → 3076: SCA exemption (90-day window), dialog open
+///     Msg 2..n: HKTAN:S(task_ref)             → 3956 pending … 0020 confirmed
+///     Then per account: HKSAL, HKKAZ (3040 touchdown pages), HKWPD for the depot
+///     Last: HKEND
+/// ```
+pub struct Ing {
+    bank: BankConfig,
+}
+
+impl Ing {
+    /// ING-DiBa's BLZ.
+    pub const BLZ: &'static str = "50010517";
+
+    pub fn new() -> Self {
+        Self {
+            bank: crate::banks::bank_by_blz(Self::BLZ).unwrap_or_else(|| {
+                // Same values as hbci4java's blz.properties.
+                BankConfig::new("ING-DiBa", Self::BLZ, "INGDDEFFXXX", "https://fints.ing.de/fints/")
+            }),
+        }
+    }
+}
+
+impl Default for Ing {
+    fn default() -> Self { Self::new() }
+}
+
+impl BankOps for Ing {
+    fn config(&self) -> &BankConfig { &self.bank }
+
+    async fn initiate(
+        &self,
+        username: &UserId,
+        pin: &Pin,
+        product_id: &ProductId,
+        session: Option<&SessionState>,
+        _target_iban: Option<&Iban>,
+        _target_bic: Option<&Bic>,
+    ) -> Result<InitiateOutcome> {
+        initiate_default(self, username, pin, product_id, session).await
+    }
+
+    async fn fetch(&self, dialog: &mut Dialog<Open>, account: &Account, days: u32) -> Result<FetchResult> {
+        fetch_default("ING", dialog, account, days).await
+    }
+
+    async fn fetch_holdings(&self, dialog: &mut Dialog<Open>, account: &Account) -> Result<Vec<SecurityHolding>> {
+        fetch_holdings_default("ING", dialog, account).await
+    }
+}
 
 // ═══════════════════════════════════════════════════════════════════════════════
 // Generic bank — any FinTS endpoint (used for custom/unknown banks)
@@ -379,60 +564,19 @@ impl BankOps for GenericBank {
         username: &UserId,
         pin: &Pin,
         product_id: &ProductId,
-        system_id: Option<&SystemId>,
+        session: Option<&SessionState>,
         _target_iban: Option<&Iban>,
         _target_bic: Option<&Bic>,
     ) -> Result<InitiateOutcome> {
-        let mut sync_dialog = self.new_dialog(username, pin, product_id)?;
-        if let Some(sid) = system_id {
-            sync_dialog = sync_dialog.with_system_id(sid);
-        }
-        let (synced, _) = sync_dialog.sync().await?;
-        let (sync_params, sys_id) = synced.end().await?;
-
-        let sys_id = if sys_id.is_assigned() { sys_id }
-            else { system_id.cloned().unwrap_or_else(SystemId::unassigned) };
-
-        let dialog = self.new_dialog(username, pin, product_id)?
-            .with_system_id(&sys_id)
-            .with_params(&sync_params);
-
-        let init_result = dialog.init().await?;
-
-        match init_result {
-            InitResult::TanRequired(tan_pending, challenge, _) => {
-                let challenge = crate::protocol::TanChallenge {
-                    decoupled: challenge.decoupled || tan_pending.bank_params().is_decoupled(),
-                    ..challenge
-                };
-                Ok(InitiateOutcome::NeedTan(InitiateResult {
-                    params: tan_pending.bank_params().clone(),
-                    system_id: tan_pending.system_id().clone(),
-                    dialog: tan_pending, challenge,
-                    tan_methods: sync_params.tan_methods.clone(),
-                    allowed_security_functions: sync_params.allowed_security_functions.clone(),
-                    no_tan_required: false,
-                }))
-            }
-            InitResult::Opened(open, _) => {
-                Ok(InitiateOutcome::Authenticated(InitiateNoTanResult {
-                    params: open.bank_params().clone(),
-                    system_id: open.system_id().clone(),
-                    dialog: open,
-                    tan_methods: sync_params.tan_methods.clone(),
-                    allowed_security_functions: sync_params.allowed_security_functions.clone(),
-                }))
-            }
-        }
+        initiate_default(self, username, pin, product_id, session).await
     }
 
     async fn fetch(&self, dialog: &mut Dialog<Open>, account: &Account, days: u32) -> Result<FetchResult> {
-        // Reuse DKB fetch logic (it's generic enough — just uses typed Dialog<Open> methods)
-        Dkb::new().fetch(dialog, account, days).await
+        fetch_default(self.bank.name.as_str(), dialog, account, days).await
     }
 
     async fn fetch_holdings(&self, dialog: &mut Dialog<Open>, account: &Account) -> Result<Vec<SecurityHolding>> {
-        Dkb::new().fetch_holdings(dialog, account).await
+        fetch_holdings_default(self.bank.name.as_str(), dialog, account).await
     }
 }
 
@@ -446,15 +590,23 @@ impl BankOps for GenericBank {
 /// which is incompatible with native async fn in traits.
 pub enum AnyBank {
     Dkb(Dkb),
+    Ing(Ing),
     Generic(GenericBank),
+}
+
+macro_rules! dispatch {
+    ($self:ident, $b:ident => $e:expr) => {
+        match $self {
+            AnyBank::Dkb($b) => $e,
+            AnyBank::Ing($b) => $e,
+            AnyBank::Generic($b) => $e,
+        }
+    };
 }
 
 impl AnyBank {
     pub fn config(&self) -> &BankConfig {
-        match self {
-            AnyBank::Dkb(b) => b.config(),
-            AnyBank::Generic(b) => b.config(),
-        }
+        dispatch!(self, b => b.config())
     }
 
     pub async fn initiate(
@@ -462,14 +614,11 @@ impl AnyBank {
         username: &UserId,
         pin: &Pin,
         product_id: &ProductId,
-        system_id: Option<&SystemId>,
+        session: Option<&SessionState>,
         target_iban: Option<&Iban>,
         target_bic: Option<&Bic>,
     ) -> Result<InitiateOutcome> {
-        match self {
-            AnyBank::Dkb(b) => b.initiate(username, pin, product_id, system_id, target_iban, target_bic).await,
-            AnyBank::Generic(b) => b.initiate(username, pin, product_id, system_id, target_iban, target_bic).await,
-        }
+        dispatch!(self, b => b.initiate(username, pin, product_id, session, target_iban, target_bic).await)
     }
 
     pub async fn fetch(
@@ -478,10 +627,7 @@ impl AnyBank {
         account: &Account,
         days: u32,
     ) -> Result<FetchResult> {
-        match self {
-            AnyBank::Dkb(b) => b.fetch(dialog, account, days).await,
-            AnyBank::Generic(b) => b.fetch(dialog, account, days).await,
-        }
+        dispatch!(self, b => b.fetch(dialog, account, days).await)
     }
 
     pub async fn fetch_holdings(
@@ -489,10 +635,7 @@ impl AnyBank {
         dialog: &mut Dialog<Open>,
         account: &Account,
     ) -> Result<Vec<SecurityHolding>> {
-        match self {
-            AnyBank::Dkb(b) => b.fetch_holdings(dialog, account).await,
-            AnyBank::Generic(b) => b.fetch_holdings(dialog, account).await,
-        }
+        dispatch!(self, b => b.fetch_holdings(dialog, account).await)
     }
 
     /// Fetch data with fine-grained control via `FetchOpts`.
@@ -503,56 +646,29 @@ impl AnyBank {
         account: &Account,
         opts: &FetchOpts,
     ) -> Result<FetchResult> {
-        use tracing::warn;
-        use crate::protocol::{BalanceResult, TransactionResult, HoldingsResult};
-        use crate::types::{Mt940Data, TransactionStatus, TouchdownPoint};
+        let tag = self.config().name.as_str().to_string();
 
-        // ── Balance ──
         let balance = if opts.balance {
             match dialog.balance(account).await {
                 Ok(BalanceResult::Success(b)) => Some(b),
-                Ok(BalanceResult::NeedTan(_)) => { warn!("Balance requires TAN — skipping"); None }
+                Ok(BalanceResult::NeedTan(_)) => { warn!("[{}] Balance requires TAN — skipping", tag); None }
                 Ok(BalanceResult::Empty) => None,
-                Err(e) => { warn!("Balance failed: {}", e); None }
+                Err(e) => { warn!("[{}] Balance failed: {}", tag, e); None }
             }
         } else {
             None
         };
 
-        // ── Transactions ──
         let transactions = if opts.transactions {
-            let end_date = chrono::Utc::now().date_naive();
-            let start_date = end_date - chrono::Duration::days(opts.days.max(1) as i64);
-            let mut all_booked = Mt940Data::new();
-            let mut all_pending = Mt940Data::new();
-            let mut td: Option<TouchdownPoint> = None;
-            loop {
-                match dialog.transactions(account, start_date, end_date, td.as_ref()).await? {
-                    TransactionResult::NeedTan(_) => break,
-                    TransactionResult::Success(page) => {
-                        if !page.booked.is_empty() { all_booked.extend(page.booked.0); }
-                        if !page.pending.is_empty() { all_pending.extend(page.pending.0); }
-                        td = page.touchdown;
-                        if td.is_none() { break; }
-                    }
-                }
-            }
-            let mut txns = parse_mt940(all_booked.as_bytes(), TransactionStatus::Booked)
-                .unwrap_or_default();
-            if !all_pending.is_empty() {
-                txns.extend(parse_mt940(all_pending.as_bytes(), TransactionStatus::Pending)
-                    .unwrap_or_default());
-            }
-            txns
+            fetch_transactions(&tag, dialog, account, opts.days).await?
         } else {
             Vec::new()
         };
 
-        // ── Holdings ──
         let holdings = if opts.holdings {
             match self.fetch_holdings(dialog, account).await {
                 Ok(h) => h,
-                Err(e) => { warn!("Holdings fetch failed: {}", e); Vec::new() }
+                Err(e) => { warn!("[{}] Holdings fetch failed: {}", tag, e); Vec::new() }
             }
         } else {
             Vec::new()
@@ -565,12 +681,13 @@ impl AnyBank {
 /// Look up a bank implementation by its BLZ (Bankleitzahl).
 ///
 /// The BLZ is the canonical bank identifier — banks are dispatched based on it.
-/// BLZ `12030000` → DKB implementation; all others → GenericBank.
+/// `12030000` → DKB, `50010517` → ING; all others → GenericBank.
 pub fn bank_ops(blz: &str) -> Result<AnyBank> {
     let config = crate::banks::bank_by_blz(blz)
         .ok_or_else(|| FinTSError::Dialog(format!("Unknown BLZ: {}", blz)))?;
     match blz {
         "12030000" => Ok(AnyBank::Dkb(Dkb::new())),
+        Ing::BLZ => Ok(AnyBank::Ing(Ing::new())),
         _ => Ok(AnyBank::Generic(GenericBank::new(config))),
     }
 }

@@ -416,3 +416,40 @@ fn test_client_transactions_json() {
         eprintln!("fints-client transactions failed — server may not support this command");
     }
 }
+
+#[test]
+fn test_client_holdings_parses_mt535_from_server() {
+    let server = match TestServer::start(&["--tan-mode", "none"]) {
+        Some(s) => s,
+        None => {
+            eprintln!("Skipping: fints-server not built");
+            return;
+        }
+    };
+    let bin = assert_cmd::cargo::cargo_bin("fints-client");
+    if !bin.exists() {
+        eprintln!("Skipping: fints-client not built");
+        return;
+    }
+
+    let url = server.url();
+    let tmp_dir = tempfile::tempdir().expect("tmpdir");
+    let output = Command::new(&bin)
+        .args([
+            "--bank", "custom", "--url", &url, "--blz", "12345678",
+            "--user", "test1", "--pin", "1234",
+            "--session-dir", tmp_dir.path().to_str().unwrap(),
+            "--output", "json",
+            "holdings", "--iban", "DE89370400440532013000", "--bic", "GENODE23X42",
+        ])
+        .output()
+        .expect("Failed to run fints-client");
+
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    assert!(output.status.success(), "holdings failed: {}\n{}", stdout, String::from_utf8_lossy(&output.stderr));
+    // The server sends one binary MT535 statement in HIWPD; all three positions must come out.
+    for isin in ["DE0005140008", "US0378331005", "IE00B4L5Y983"] {
+        assert!(stdout.contains(isin), "missing {isin} in: {stdout}");
+    }
+    assert!(stdout.contains("ISHARES CORE MSCI WORLD ETF"), "name from :35B: missing: {stdout}");
+}

@@ -9,24 +9,28 @@
 //!    state is in the type system. Business ops on an unauthenticated dialog = compile error.
 //!
 //! 2. **Workflow layer** (`workflow`): Bank workflows via the `BankOps` trait,
-//!    dispatched by BLZ (`bank_ops`/`AnyBank`; DKB and a generic implementation).
+//!    dispatched by BLZ (`bank_ops`/`AnyBank`; DKB, ING and a generic implementation).
 //!
 //! 3. **Flow layer** (`flow`): High-level `Flow` for connect → TAN confirm → fetch.
 //!
 //! ## Quick start
 //!
 //! ```rust,no_run
-//! use fints::{Flow, UserId, Pin, ProductId};
+//! use fints::{CancellationToken, DecoupledOptions, Flow, UserId, Pin, ProductId, SessionState};
 //!
-//! # async fn example() -> fints::Result<()> {
-//! // BLZ 12030000 = DKB; any other registry BLZ works too.
-//! let (mut flow, challenge) = Flow::initiate(
-//!     "12030000", &UserId::new("user"), &Pin::new("pin"), &ProductId::new("PRODUCT_ID"),
-//!     None, None, None,
+//! # async fn example(saved: Option<SessionState>) -> fints::Result<()> {
+//! // BLZ 50010517 = ING; any other registry BLZ works too.
+//! let (mut flow, _info) = Flow::initiate(
+//!     "50010517", &UserId::new("user"), &Pin::new("pin"), &ProductId::new("PRODUCT_ID"),
+//!     saved.as_ref(), None, None,
 //! ).await?;
-//! // User confirms pushTAN in banking app...
-//! let result = flow.confirm_and_fetch("DE123...", "BYLADEM...", 365).await?;
+//! if flow.needs_tan() {
+//!     // pushTAN: wait for the confirmation in the banking app
+//!     flow.await_decoupled(CancellationToken::new(), &DecoupledOptions::default(), |_| {}).await?;
+//! }
+//! let result = flow.confirm_and_fetch("DE123...", "INGDDEFFXXX", 365).await?;
 //! println!("Balance: {:?}, {} transactions", result.balance, result.transactions.len());
+//! let state = flow.session_state(); // persist (encrypted) for the next run
 //! # Ok(())
 //! # }
 //! ```
@@ -50,6 +54,8 @@ pub mod audit;
 pub mod protocol;
 pub mod workflow;
 pub mod flow;
+pub mod quirks;
+pub mod session;
 
 // ═══════════════════════════════════════════════════════════════════════════════
 // Re-exports
@@ -59,7 +65,8 @@ pub mod flow;
 pub use flow::{Flow, ChallengeInfo, SyncResult, FetchOptions};
 
 // Workflow layer
-pub use workflow::{BankOps, AnyBank, Dkb, GenericBank, bank_ops, bank_ops_with_config};
+pub use workflow::{BankOps, AnyBank, Dkb, Ing, GenericBank, bank_ops, bank_ops_with_config};
+pub use workflow::{initiate_default, fetch_default, fetch_transactions, fetch_holdings_default};
 pub use workflow::{InitiateOutcome, InitiateResult, InitiateNoTanResult, FetchResult, FetchOpts};
 
 // Protocol layer
@@ -67,6 +74,7 @@ pub use protocol::{
     Dialog, Response, TanChallenge, BankParams, Account,
     New, Synced, Open, TanPending,
     InitResult, SendResult, PollResult,
+    DecoupledEvent, DecoupledOptions, DecoupledParams,
     BalanceResult, TransactionResult, TransactionPage,
     HoldingsResult, HoldingsPage,
 };
@@ -81,6 +89,8 @@ pub use types::{
     BankName, FinTSUrl, ChallengeText, HhdUcData, Mt940Data,
 };
 pub use error::{FinTSError, Result};
+pub use session::SessionState;
+pub use tokio_util::sync::CancellationToken;
 pub use banks::{BankConfig, all_banks, bank_by_blz};
 
 // Debug / audit tooling

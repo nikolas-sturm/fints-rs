@@ -1,14 +1,25 @@
-//! High-level Flow API for the GraphQL layer.
+//! High-level Flow API.
 //!
-//! Orchestrates the two-step interactive TAN flow:
-//! 1. `Flow::initiate()` → challenge info, holds dialog in TanPending/Open
-//! 2. `Flow::confirm_and_fetch()` → polls TAN, fetches data
+//! Orchestrates the interactive TAN flow for one user at one bank:
+//!
+//! 1. [`Flow::initiate`] — [sync +] dialog init. Pass the [`SessionState`]
+//!    from the previous run so the sync dialog is skipped and the bank keeps
+//!    seeing the same system ID.
+//! 2. If [`Flow::needs_tan`]: [`Flow::await_decoupled`] waits for the app
+//!    confirmation (pushTAN), reporting progress through a callback.
+//! 3. [`Flow::fetch`] any number of accounts in the same dialog.
+//! 4. [`Flow::finish`] ends the dialog and returns the updated
+//!    [`SessionState`] to persist (encrypted) for the next run.
+//!
+//! The older one-shot helpers (`confirm_and_fetch*`) still work: they poll
+//! the TAN status once, fetch one account and end the dialog.
 
 use serde::{Deserialize, Serialize};
 use tracing::info;
 
 use crate::error::{FinTSError, Result};
 use crate::protocol::*;
+use crate::session::SessionState;
 use crate::types::*;
 use crate::workflow::*;
 
@@ -48,7 +59,7 @@ pub struct SyncResult {
 enum FlowState {
     WaitingForTan {
         dialog: Dialog<TanPending>,
-        task_reference: TaskReference,
+        challenge: TanChallenge,
     },
     Authenticated {
         dialog: Dialog<Open>,
@@ -59,8 +70,14 @@ enum FlowState {
 pub struct Flow {
     bank: AnyBank,
     state: FlowState,
+    blz: Blz,
+    user_id: UserId,
     system_id: SystemId,
+    /// Latest bank parameters, kept after the dialog ends for `session_state()`.
+    params: BankParams,
 }
+
+const STILL_PENDING: &str = "TAN still pending: user has not yet confirmed in banking app";
 
 impl Flow {
     /// Step 1: initiate connection using an already-resolved AnyBank.
@@ -70,25 +87,28 @@ impl Flow {
         username: &UserId,
         pin: &Pin,
         product_id: &ProductId,
-        system_id: Option<&SystemId>,
+        session: Option<&SessionState>,
         target_iban: Option<&Iban>,
         target_bic: Option<&Bic>,
     ) -> Result<(Self, ChallengeInfo)> {
-        Self::initiate_inner(bank, username, pin, product_id, system_id, target_iban, target_bic).await
+        Self::initiate_inner(bank, username, pin, product_id, session, target_iban, target_bic).await
     }
 
-    /// Step 1: initiate connection, get TAN challenge.
+    /// Step 1: initiate connection by BLZ, get TAN challenge.
+    ///
+    /// `session`: state from the previous run (see [`Flow::finish`]), or `None`
+    /// on the very first run.
     pub async fn initiate(
         bank_id: &str,
         username: &UserId,
         pin: &Pin,
         product_id: &ProductId,
-        system_id: Option<&SystemId>,
+        session: Option<&SessionState>,
         target_iban: Option<&Iban>,
         target_bic: Option<&Bic>,
     ) -> Result<(Self, ChallengeInfo)> {
         let bank = bank_ops(bank_id)?;
-        Self::initiate_inner(bank, username, pin, product_id, system_id, target_iban, target_bic).await
+        Self::initiate_inner(bank, username, pin, product_id, session, target_iban, target_bic).await
     }
 
     async fn initiate_inner(
@@ -96,19 +116,20 @@ impl Flow {
         username: &UserId,
         pin: &Pin,
         product_id: &ProductId,
-        system_id: Option<&SystemId>,
+        session: Option<&SessionState>,
         target_iban: Option<&Iban>,
         target_bic: Option<&Bic>,
     ) -> Result<(Self, ChallengeInfo)> {
         let outcome = bank.initiate(
-            username, pin, product_id, system_id, target_iban, target_bic,
+            username, pin, product_id, session, target_iban, target_bic,
         ).await?;
+        let blz = bank.config().blz.clone();
 
         match outcome {
             InitiateOutcome::NeedTan(result) => {
                 let info = ChallengeInfo {
                     challenge: result.challenge.challenge.clone(),
-                    challenge_hhduc: result.challenge.challenge_hhduc.clone(),      
+                    challenge_hhduc: result.challenge.challenge_hhduc.clone(),
                     decoupled: result.challenge.decoupled,
                     tan_methods: result.tan_methods,
                     allowed_security_functions: result.allowed_security_functions,
@@ -118,16 +139,19 @@ impl Flow {
                     bank,
                     state: FlowState::WaitingForTan {
                         dialog: result.dialog,
-                        task_reference: result.challenge.task_reference,
+                        challenge: result.challenge,
                     },
+                    blz,
+                    user_id: username.clone(),
                     system_id: result.system_id,
+                    params: result.params,
                 };
                 Ok((flow, info))
             }
             InitiateOutcome::Authenticated(result) => {
                 let info = ChallengeInfo {
                     challenge: ChallengeText::new(""),
-                    challenge_hhduc: None,      
+                    challenge_hhduc: None,
                     decoupled: false,
                     tan_methods: result.tan_methods,
                     allowed_security_functions: result.allowed_security_functions,
@@ -136,14 +160,151 @@ impl Flow {
                 let flow = Flow {
                     bank,
                     state: FlowState::Authenticated { dialog: result.dialog },
+                    blz,
+                    user_id: username.clone(),
                     system_id: result.system_id,
+                    params: result.params,
                 };
                 Ok((flow, info))
             }
         }
     }
 
-    /// Step 2: confirm TAN and fetch everything (balance + transactions + holdings).
+    /// True while a TAN confirmation is pending.
+    pub fn needs_tan(&self) -> bool {
+        matches!(self.state, FlowState::WaitingForTan { .. })
+    }
+
+    /// The pending TAN challenge, if any.
+    pub fn challenge(&self) -> Option<&TanChallenge> {
+        match &self.state {
+            FlowState::WaitingForTan { challenge, .. } => Some(challenge),
+            _ => None,
+        }
+    }
+
+    /// Step 2 (decoupled TAN, e.g. pushTAN): wait until the user confirms in
+    /// the banking app, polling at the bank's announced intervals.
+    ///
+    /// Returns immediately if no TAN is pending. On timeout, cancellation or a
+    /// bank error the dialog is gone and the flow is finished; start over with
+    /// [`Flow::initiate`].
+    pub async fn await_decoupled(
+        &mut self,
+        cancel: tokio_util::sync::CancellationToken,
+        opts: &DecoupledOptions,
+        on_event: impl FnMut(DecoupledEvent) + Send,
+    ) -> Result<()> {
+        match std::mem::replace(&mut self.state, FlowState::Done) {
+            FlowState::WaitingForTan { dialog, challenge } => {
+                let (open, _response) = dialog.await_decoupled(&challenge, cancel, opts, on_event).await?;
+                info!("[Flow] Decoupled TAN confirmed");
+                self.params = open.bank_params().clone();
+                self.state = FlowState::Authenticated { dialog: open };
+                Ok(())
+            }
+            other => {
+                let done = matches!(other, FlowState::Done);
+                self.state = other;
+                if done { Err(FinTSError::Dialog("Flow already completed".into())) } else { Ok(()) }
+            }
+        }
+    }
+
+    /// Poll the decoupled TAN status once. `Ok(true)` = confirmed (or no TAN
+    /// was pending), `Ok(false)` = still pending. Prefer [`Flow::await_decoupled`],
+    /// which respects the bank's polling rules.
+    pub async fn poll_once(&mut self) -> Result<bool> {
+        match std::mem::replace(&mut self.state, FlowState::Done) {
+            FlowState::WaitingForTan { dialog, challenge } => {
+                match dialog.poll(&challenge.task_reference).await? {
+                    PollResult::Confirmed(open, _response) => {
+                        info!("[Flow] TAN confirmed");
+                        self.params = open.bank_params().clone();
+                        self.state = FlowState::Authenticated { dialog: open };
+                        Ok(true)
+                    }
+                    PollResult::Pending(dialog) => {
+                        self.state = FlowState::WaitingForTan { dialog, challenge };
+                        Ok(false)
+                    }
+                }
+            }
+            FlowState::Done => Err(FinTSError::Dialog("Flow already completed".into())),
+            other => {
+                self.state = other;
+                Ok(true)
+            }
+        }
+    }
+
+    /// Accounts the bank listed in the UPD (giro, savings, depot, …).
+    pub fn accounts(&self) -> &[SepaAccount] {
+        match &self.state {
+            FlowState::Authenticated { dialog } => &dialog.bank_params().accounts_from_upd,
+            FlowState::WaitingForTan { dialog, .. } => &dialog.bank_params().accounts_from_upd,
+            FlowState::Done => &self.params.accounts_from_upd,
+        }
+    }
+
+    /// Step 3: fetch data for one account. The dialog stays open, so call this
+    /// for every account, then [`Flow::finish`].
+    pub async fn fetch(&mut self, account: &Account, opts: &FetchOpts) -> Result<FetchResult> {
+        match &mut self.state {
+            FlowState::Authenticated { dialog } => {
+                let result = self.bank.fetch_with_opts(dialog, account, opts).await;
+                self.params = dialog.bank_params().clone();
+                result
+            }
+            FlowState::WaitingForTan { .. } => Err(FinTSError::Dialog(
+                "TAN confirmation pending: call await_decoupled() first".into(),
+            )),
+            FlowState::Done => Err(FinTSError::Dialog("Flow already completed".into())),
+        }
+    }
+
+    /// Step 4: end the dialog and return the session state to persist.
+    pub async fn finish(mut self) -> Result<SessionState> {
+        self.end_dialog().await;
+        Ok(self.session_state())
+    }
+
+    /// Current session state (system ID, BPD/UPD, TAN method) to persist.
+    pub fn session_state(&self) -> SessionState {
+        let (params, system_id) = match &self.state {
+            FlowState::Authenticated { dialog } => (dialog.bank_params(), dialog.system_id()),
+            FlowState::WaitingForTan { dialog, .. } => (dialog.bank_params(), dialog.system_id()),
+            FlowState::Done => (&self.params, &self.system_id),
+        };
+        SessionState::capture(&self.blz, &self.user_id, system_id, params)
+    }
+
+    async fn end_dialog(&mut self) {
+        match std::mem::replace(&mut self.state, FlowState::Done) {
+            FlowState::Authenticated { dialog } => {
+                self.params = dialog.bank_params().clone();
+                self.system_id = dialog.system_id().clone();
+                dialog.end().await.ok();
+            }
+            FlowState::WaitingForTan { dialog, .. } => {
+                self.params = dialog.bank_params().clone();
+                dialog.cancel().await.ok();
+            }
+            FlowState::Done => {}
+        }
+    }
+
+    /// Ensure the dialog is authenticated, polling the TAN status once.
+    async fn ensure_authenticated(&mut self) -> Result<()> {
+        if self.poll_once().await? {
+            Ok(())
+        } else {
+            Err(FinTSError::Dialog(STILL_PENDING.into()))
+        }
+    }
+
+    /// Step 2+3 in one go: poll TAN once and fetch everything
+    /// (balance + transactions + holdings), then end the dialog.
     /// Equivalent to `confirm_and_fetch_opts(iban, bic, FetchOpts::all(days))`.
     pub async fn confirm_and_fetch(
         &mut self,
@@ -154,107 +315,56 @@ impl Flow {
         self.confirm_and_fetch_opts(iban, bic, &FetchOpts::all(days)).await
     }
 
-    /// Step 2 with fine-grained fetch control.
-    /// Use `FetchOpts` to choose which data to retrieve in a single dialog.
+    /// Like [`Flow::confirm_and_fetch`] with fine-grained fetch control.
+    /// If the TAN is still pending, returns an error and the flow stays usable.
     pub async fn confirm_and_fetch_opts(
         &mut self,
         iban: &str,
         bic: &str,
         opts: &FetchOpts,
     ) -> Result<SyncResult> {
-        let state = std::mem::replace(&mut self.state, FlowState::Done);
-
-        match state {
-            FlowState::WaitingForTan { dialog, task_reference } => {
-                let poll_result = dialog.poll(&task_reference).await?;
-
-                match poll_result {
-                    PollResult::Confirmed(mut open, _response) => {
-                        info!("[Flow] TAN confirmed — fetching data");
-                        let account = self.resolve_account(iban, bic)?;
-                        let fetch = self.bank.fetch_with_opts(&mut open, &account, opts).await?;
-                        let sys_id = open.system_id().clone();
-                        open.end().await.ok();
-                        Ok(SyncResult {
-                            iban: Iban::new(iban), bic: Bic::new(bic),
-                            balance: fetch.balance, transactions: fetch.transactions,
-                            holdings: fetch.holdings,
-                            system_id: Some(sys_id),
-                        })
-                    }
-                    PollResult::Pending(dialog) => {
-                        self.state = FlowState::WaitingForTan { dialog, task_reference };
-                        Err(FinTSError::Dialog(
-                            "TAN still pending: user has not yet confirmed in banking app".into()
-                        ))
-                    }
-                }
-            }
-            FlowState::Authenticated { mut dialog } => {
-                info!("[Flow] Already authenticated — fetching directly");
-                let account = self.resolve_account(iban, bic)?;
-                let fetch = self.bank.fetch_with_opts(&mut dialog, &account, opts).await?;
-                let sys_id = dialog.system_id().clone();
-                dialog.end().await.ok();
-                Ok(SyncResult {
-                    iban: Iban::new(iban), bic: Bic::new(bic),
-                    balance: fetch.balance, transactions: fetch.transactions,
-                    holdings: fetch.holdings,
-                    system_id: Some(sys_id),
-                })
-            }
-            FlowState::Done => {
-                Err(FinTSError::Dialog("Flow already completed".into()))
-            }
-        }
+        self.ensure_authenticated().await?;
+        let account = self.resolve_account(iban, bic)?;
+        let fetch = self.fetch(&account, opts).await;
+        self.end_dialog().await;
+        let fetch = fetch?;
+        Ok(SyncResult {
+            iban: Iban::new(iban), bic: Bic::new(bic),
+            balance: fetch.balance, transactions: fetch.transactions,
+            holdings: fetch.holdings,
+            system_id: Some(self.system_id.clone()),
+        })
     }
 
-    /// Step 2 (alternative): confirm TAN and fetch only securities holdings.
+    /// Poll TAN once and fetch only securities holdings, then end the dialog.
     pub async fn confirm_and_fetch_holdings(
         &mut self,
         iban: &str,
         bic: &str,
     ) -> Result<Vec<SecurityHolding>> {
-        let state = std::mem::replace(&mut self.state, FlowState::Done);
-
-        match state {
-            FlowState::WaitingForTan { dialog, task_reference } => {
-                let poll_result = dialog.poll(&task_reference).await?;
-
-                match poll_result {
-                    PollResult::Confirmed(mut open, _response) => {
-                        info!("[Flow] TAN confirmed — fetching holdings");
-                        let account = self.resolve_account(iban, bic)?;
-                        let holdings = self.bank.fetch_holdings(&mut open, &account).await?;
-                        open.end().await.ok();
-                        Ok(holdings)
-                    }
-                    PollResult::Pending(dialog) => {
-                        self.state = FlowState::WaitingForTan { dialog, task_reference };
-                        Err(FinTSError::Dialog(
-                            "TAN still pending: user has not yet confirmed in banking app".into()
-                        ))
-                    }
-                }
-            }
-            FlowState::Authenticated { mut dialog } => {
-                info!("[Flow] Already authenticated — fetching holdings directly");
-                let account = self.resolve_account(iban, bic)?;
-                let holdings = self.bank.fetch_holdings(&mut dialog, &account).await?;
-                dialog.end().await.ok();
-                Ok(holdings)
-            }
-            FlowState::Done => {
-                Err(FinTSError::Dialog("Flow already completed".into()))
-            }
-        }
+        self.ensure_authenticated().await?;
+        let account = self.resolve_account(iban, bic)?;
+        let result = match &mut self.state {
+            FlowState::Authenticated { dialog } => self.bank.fetch_holdings(dialog, &account).await,
+            _ => Err(FinTSError::Dialog("Flow already completed".into())),
+        };
+        self.end_dialog().await;
+        result
     }
 
     pub fn system_id(&self) -> &SystemId { &self.system_id }
 
-    /// Resolve account with bank's BIC as fallback.
+    /// Resolve account with bank's BIC as fallback; prefer the UPD entry for
+    /// this IBAN so the bank's own account number is used for national formats.
     fn resolve_account(&self, iban: &str, bic: &str) -> Result<Account> {
-        let bic = if bic.is_empty() { self.bank.config().bic.as_str() } else { bic };
-        Account::new(iban, bic)
+        let bank_bic = self.bank.config().bic.as_str();
+        if let Some(acc) = self.accounts().iter().find(|a| a.iban.as_str() == iban) {
+            let acc = SepaAccount {
+                bic: Bic::new(if bic.is_empty() { acc.bic.as_str() } else { bic }),
+                ..acc.clone()
+            };
+            return Account::from_sepa(&acc, bank_bic);
+        }
+        Account::new(iban, if bic.is_empty() { bank_bic } else { bic })
     }
 }

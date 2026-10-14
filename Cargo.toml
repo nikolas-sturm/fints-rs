@@ -3,8 +3,11 @@ name = "fints-rs"
 version = "0.2.0"
 edition = "2021"
 description = "Native Rust FinTS 3.0 PinTan client for German online banking"
-license = "MIT"
-repository = "https://github.com/floffel/fints-rs"
+# MIT for everything written from the FinTS spec or for this crate;
+# src/quirks/hbci4java.rs and tests/fixtures/hbci4java/ derive from hbci4java
+# and are LGPL-2.1-or-later. See NOTICE.
+license = "MIT AND LGPL-2.1-or-later"
+repository = "https://github.com/nikolas-sturm/fints-rs"
 keywords = ["fints", "hbci", "banking", "germany", "pintan"]
 categories = ["finance"]
 
@@ -12,26 +15,30 @@ categories = ["finance"]
 name = "fints"
 path = "src/lib.rs"
 
+# Versions are pinned to the minimum we build and test against (Cargo.lock
+# is committed for reproducible builds). Bump deliberately, then run
+# `cargo test --all-features` and `cargo deny check`.
 [dependencies]
-reqwest = { version = "0.12", features = ["rustls-tls"], default-features = false }
-base64 = "0.22"
-encoding_rs = "0.8"
-mt940 = "1.1"
-chrono = { version = "0.4", features = ["serde"] }
-rust_decimal = { version = "1.35", features = ["serde-with-str"] }
-serde = { version = "1.0", features = ["derive"] }
-serde_json = "1.0"
-thiserror = "2"
-tracing = "0.1"
-rand = "0.9"
-tokio = { version = "1", features = ["full"] }
-axum = { version = "0.8", optional = true }
-clap = { version = "4", features = ["derive"], optional = true }
-rpassword = { version = "7", optional = true }
-comfy-table = { version = "7", optional = true }
-csv = { version = "1", optional = true }
-tracing-subscriber = { version = "0.3", features = ["env-filter"], optional = true }
-flate2 = { version = "1", optional = true }
+reqwest = { version = "0.12.28", features = ["rustls-tls"], default-features = false }
+base64 = "0.22.1"
+encoding_rs = "0.8.42"
+mt940 = "1.1.1"
+chrono = { version = "0.4.45", features = ["serde"] }
+rust_decimal = { version = "1.43.0", features = ["serde-with-str"] }
+serde = { version = "1.0.229", features = ["derive"] }
+serde_json = "1.0.154"
+thiserror = "2.0.21"
+tracing = "0.1.44"
+rand = "0.9.5"
+tokio = { version = "1.53.3", features = ["full"] }
+tokio-util = "0.7.20"
+axum = { version = "0.8.9", optional = true }
+clap = { version = "4.6.7", features = ["derive"], optional = true }
+rpassword = { version = "7.5.4", optional = true }
+comfy-table = { version = "7.2.2", optional = true }
+csv = { version = "1.4.0", optional = true }
+tracing-subscriber = { version = "0.3.23", features = ["env-filter"], optional = true }
+flate2 = { version = "1.1.10", optional = true }
 
 [features]
 default = []
@@ -49,9 +56,9 @@ path = "src/bin/client.rs"
 required-features = ["cli"]
 
 [dev-dependencies]
-tokio = { version = "1", features = ["full"] }
-chrono = "0.4"
-proptest = "1"
-assert_cmd = "2"
-predicates = "3"
-tempfile = "3"
+tokio = { version = "1.53.3", features = ["full"] }
+chrono = "0.4.45"
+proptest = "1.12.0"
+assert_cmd = "2.2.2"
+predicates = "3.1.4"
+tempfile = "3.27.0"

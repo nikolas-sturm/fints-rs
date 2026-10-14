@@ -54,9 +54,17 @@ fn test_response_code_all_known_codes() {
         ("9050", ResponseCodeKind::PartialErrors),
         ("9110", ResponseCodeKind::UnexpectedInSync),
         ("9160", ResponseCodeKind::DataElementMissing),
-        ("9340", ResponseCodeKind::PinWrong),
+        ("9340", ResponseCodeKind::PinWrong("9340".into())),
         ("9800", ResponseCodeKind::DialogAborted),
-        ("9942", ResponseCodeKind::AccountLocked),
+        // hbci4java KnownReturncode / python-fints: 9942 = PIN wrong,
+        // 9930/9931 = PIN or access locked.
+        ("9910", ResponseCodeKind::PinWrong("9910".into())),
+        ("9942", ResponseCodeKind::PinWrong("9942".into())),
+        ("9930", ResponseCodeKind::AccountLocked("9930".into())),
+        ("9931", ResponseCodeKind::AccountLocked("9931".into())),
+        ("9391", ResponseCodeKind::SystemIdInvalid),
+        ("3091", ResponseCodeKind::VopNotRequired),
+        ("3945", ResponseCodeKind::VopApprovalNotPossible),
     ];
     for (code, expected) in cases {
         let kind = ResponseCodeKind::from_code(code, &[]);
@@ -155,6 +163,8 @@ fn test_bankparams_select_security_function_prefers_decoupled() {
             wait_before_next_poll: 0,
             is_decoupled: false,
             hktan_version: 7,
+            zka_name: None,
+            decoupled_auto_polling: None,
         },
         TanMethod {
             security_function: SecurityFunction::new("940"),
@@ -166,6 +176,8 @@ fn test_bankparams_select_security_function_prefers_decoupled() {
             wait_before_next_poll: 5,
             is_decoupled: true,
             hktan_version: 7,
+            zka_name: None,
+            decoupled_auto_polling: None,
         },
     ];
     params.select_security_function();
@@ -196,6 +208,8 @@ fn test_bankparams_select_security_function_uses_preference() {
             wait_before_next_poll: 0,
             is_decoupled: false,
             hktan_version: 7,
+            zka_name: None,
+            decoupled_auto_polling: None,
         },
         TanMethod {
             security_function: SecurityFunction::new("940"),
@@ -207,6 +221,8 @@ fn test_bankparams_select_security_function_uses_preference() {
             wait_before_next_poll: 5,
             is_decoupled: true,
             hktan_version: 7,
+            zka_name: None,
+            decoupled_auto_polling: None,
         },
     ];
     params.select_security_function();
@@ -221,11 +237,11 @@ fn test_bankparams_select_security_function_uses_preference() {
 #[test]
 fn test_bankparams_decoupled_params_defaults() {
     let params = BankParams::new();
-    // No tan methods → should return (5, 5, 20) defaults
-    let (first, next, max) = params.decoupled_params();
-    assert_eq!(first, 5);
-    assert_eq!(next, 5);
-    assert_eq!(max, 20);
+    // No TAN methods → nothing announced; the caller's DecoupledOptions decide.
+    let p = params.decoupled_params();
+    assert_eq!(p.wait_before_first_poll, None);
+    assert_eq!(p.wait_before_next_poll, None);
+    assert_eq!(p.max_polls, None);
 }
 
 // ─── Task A.11: SystemId assignment ──────────────────────────────────────────

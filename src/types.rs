@@ -186,14 +186,24 @@ pub enum ResponseCodeKind {
     Touchdown(TouchdownPoint),
     /// 3060 — Partial warnings.
     PartialWarnings,
+    /// 3072 — Access data changed: the bank assigned a new user ID / customer ID.
+    /// hbci4java hands these to the application; we also drop the cached UPD.
+    UserDataChanged {
+        user_id: Option<String>,
+        customer_id: Option<String>,
+    },
     /// 3076 — No strong authentication required (SCA exemption).
     ScaExemption,
+    /// 3091 — Verification of Payee not required (VoP exemption). Irrelevant for read-only use.
+    VopNotRequired,
     /// 3920 — Allowed security functions. Contains the list.
     AllowedSecurityFunctions(Vec<SecurityFunction>),
     /// 3955 — Decoupled TAN initiated (confirm in app).
     DecoupledInitiated,
     /// 3956 — Decoupled TAN not yet confirmed.
     DecoupledPending,
+    /// 3945 — Verification of Payee approval cannot be granted. Irrelevant for read-only use.
+    VopApprovalNotPossible,
     /// 9010 — General error.
     GeneralError,
     /// 9040 — Authentication missing.
@@ -204,12 +214,16 @@ pub enum ResponseCodeKind {
     UnexpectedInSync,
     /// 9160 — Data element missing.
     DataElementMissing,
-    /// 9340 — PIN wrong.
-    PinWrong,
+    /// 9340 / 9910 / 9942 — PIN wrong (hbci4java: 9340 "Signatur falsch", 9942 "PIN falsch").
+    /// Carries the actual code.
+    PinWrong(String),
+    /// 9391 — System ID invalid: a new customer system ID must be fetched (re-sync).
+    SystemIdInvalid,
     /// 9800 — Dialog aborted.
     DialogAborted,
-    /// 9942 — Account/user locked.
-    AccountLocked,
+    /// 9930 / 9931 — PIN or access locked (hbci4java: "PIN ist gesperrt",
+    /// "Konto gesperrt wegen falscher PIN"). Carries the actual code.
+    AccountLocked(String),
     /// Other success code (0xxx).
     OtherSuccess(String),
     /// Other warning code (3xxx).
@@ -236,7 +250,14 @@ impl ResponseCodeKind {
                 parameters.first().map(|s| s.as_str()).unwrap_or(""),
             )),
             "3060" => Self::PartialWarnings,
+            "3072" => Self::UserDataChanged {
+                user_id: parameters.first().filter(|s| !s.is_empty()).cloned(),
+                // Like hbci4java: customer ID defaults to the user ID.
+                customer_id: parameters.get(1).or(parameters.first()).filter(|s| !s.is_empty()).cloned(),
+            },
             "3076" => Self::ScaExemption,
+            "3091" => Self::VopNotRequired,
+            "3945" => Self::VopApprovalNotPossible,
             "3920" => Self::AllowedSecurityFunctions(
                 parameters
                     .iter()
@@ -250,13 +271,47 @@ impl ResponseCodeKind {
             "9050" => Self::PartialErrors,
             "9110" => Self::UnexpectedInSync,
             "9160" => Self::DataElementMissing,
-            "9340" => Self::PinWrong,
+            "9340" | "9910" | "9942" => Self::PinWrong(code.to_string()),
+            "9391" => Self::SystemIdInvalid,
             "9800" => Self::DialogAborted,
-            "9942" => Self::AccountLocked,
+            "9930" | "9931" => Self::AccountLocked(code.to_string()),
             _ if code.starts_with('0') => Self::OtherSuccess(code.to_string()),
             _ if code.starts_with('3') => Self::OtherWarning(code.to_string()),
             _ if code.starts_with('9') => Self::OtherError(code.to_string()),
             _ => Self::Unknown(code.to_string()),
+        }
+    }
+
+    /// The four-digit FinTS return code.
+    pub fn code(&self) -> &str {
+        match self {
+            Self::MessageReceived => "0010",
+            Self::OrderExecuted => "0020",
+            Self::TanRequired => "0030",
+            Self::DialogEnded => "0100",
+            Self::TanValid => "0900",
+            Self::Touchdown(_) => "3040",
+            Self::PartialWarnings => "3060",
+            Self::UserDataChanged { .. } => "3072",
+            Self::ScaExemption => "3076",
+            Self::VopNotRequired => "3091",
+            Self::AllowedSecurityFunctions(_) => "3920",
+            Self::VopApprovalNotPossible => "3945",
+            Self::DecoupledInitiated => "3955",
+            Self::DecoupledPending => "3956",
+            Self::GeneralError => "9010",
+            Self::AuthenticationMissing => "9040",
+            Self::PartialErrors => "9050",
+            Self::UnexpectedInSync => "9110",
+            Self::DataElementMissing => "9160",
+            Self::SystemIdInvalid => "9391",
+            Self::DialogAborted => "9800",
+            Self::PinWrong(c)
+            | Self::AccountLocked(c)
+            | Self::OtherSuccess(c)
+            | Self::OtherWarning(c)
+            | Self::OtherError(c)
+            | Self::Unknown(c) => c,
         }
     }
 
@@ -277,7 +332,10 @@ impl ResponseCodeKind {
             self,
             Self::Touchdown(_)
                 | Self::PartialWarnings
+                | Self::UserDataChanged { .. }
                 | Self::ScaExemption
+                | Self::VopNotRequired
+                | Self::VopApprovalNotPossible
                 | Self::AllowedSecurityFunctions(_)
                 | Self::DecoupledInitiated
                 | Self::DecoupledPending
@@ -293,9 +351,10 @@ impl ResponseCodeKind {
                 | Self::PartialErrors
                 | Self::UnexpectedInSync
                 | Self::DataElementMissing
-                | Self::PinWrong
+                | Self::PinWrong(_)
+                | Self::SystemIdInvalid
                 | Self::DialogAborted
-                | Self::AccountLocked
+                | Self::AccountLocked(_)
                 | Self::OtherError(_)
         )
     }
@@ -470,31 +529,7 @@ impl ResponseCode {
 
     /// Raw code string for logging/display.
     pub fn code(&self) -> &str {
-        match &self.kind {
-            ResponseCodeKind::MessageReceived => "0010",
-            ResponseCodeKind::OrderExecuted => "0020",
-            ResponseCodeKind::TanRequired => "0030",
-            ResponseCodeKind::DialogEnded => "0100",
-            ResponseCodeKind::TanValid => "0900",
-            ResponseCodeKind::Touchdown(_) => "3040",
-            ResponseCodeKind::PartialWarnings => "3060",
-            ResponseCodeKind::ScaExemption => "3076",
-            ResponseCodeKind::AllowedSecurityFunctions(_) => "3920",
-            ResponseCodeKind::DecoupledInitiated => "3955",
-            ResponseCodeKind::DecoupledPending => "3956",
-            ResponseCodeKind::GeneralError => "9010",
-            ResponseCodeKind::AuthenticationMissing => "9040",
-            ResponseCodeKind::PartialErrors => "9050",
-            ResponseCodeKind::UnexpectedInSync => "9110",
-            ResponseCodeKind::DataElementMissing => "9160",
-            ResponseCodeKind::PinWrong => "9340",
-            ResponseCodeKind::DialogAborted => "9800",
-            ResponseCodeKind::AccountLocked => "9942",
-            ResponseCodeKind::OtherSuccess(c)
-            | ResponseCodeKind::OtherWarning(c)
-            | ResponseCodeKind::OtherError(c)
-            | ResponseCodeKind::Unknown(c) => c,
-        }
+        self.kind.code()
     }
 
     pub fn is_success(&self) -> bool {
@@ -522,13 +557,13 @@ impl ResponseCode {
         matches!(self.kind, ResponseCodeKind::DecoupledPending)
     }
     pub fn is_pin_wrong(&self) -> bool {
-        matches!(self.kind, ResponseCodeKind::PinWrong)
+        matches!(self.kind, ResponseCodeKind::PinWrong(_))
     }
     pub fn is_general_error(&self) -> bool {
         matches!(self.kind, ResponseCodeKind::GeneralError)
     }
     pub fn is_locked(&self) -> bool {
-        matches!(self.kind, ResponseCodeKind::AccountLocked)
+        matches!(self.kind, ResponseCodeKind::AccountLocked(_))
     }
 }
 
@@ -543,16 +578,24 @@ pub struct TanMethod {
     pub name: String,
     /// Whether TAN medium name must be sent
     pub needs_tan_medium: bool,
-    /// Maximum number of decoupled polls (-1 = unlimited)
+    /// Maximum number of decoupled status polls (HKTAN process S).
+    /// `0` = unlimited (per spec), `-1` = not provided by the bank.
     pub decoupled_max_polls: i32,
-    /// Seconds to wait before first decoupled poll
+    /// Seconds to wait before first decoupled poll (0 = not provided)
     pub wait_before_first_poll: i32,
-    /// Seconds to wait between decoupled polls
+    /// Seconds to wait between decoupled polls (0 = not provided)
     pub wait_before_next_poll: i32,
     /// Whether this is a decoupled method
     pub is_decoupled: bool,
-    /// HKTAN version
+    /// HKTAN version (= version of the HITANS segment that announced this method)
     pub hktan_version: u16,
+    /// DK TAN method identifier (formerly "ZKA TAN-Verfahren"), e.g. "Decoupled" or "HHD".
+    #[serde(default)]
+    pub zka_name: Option<String>,
+    /// Whether the bank allows automated decoupled status polling (HITANS v7).
+    /// `Some(false)` means the user should confirm manually in the client before we poll.
+    #[serde(default)]
+    pub decoupled_auto_polling: Option<bool>,
 }
 
 /// SEPA account info as returned by HISPA / HIUPD.
