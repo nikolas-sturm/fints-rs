@@ -38,6 +38,13 @@ pub struct ChallengeInfo {
     pub no_tan_required: bool,
 }
 
+impl ChallengeInfo {
+    /// The challenge's flicker code or photoTAN/QR image, if it has one.
+    pub fn media(&self) -> Option<TanMedia> {
+        self.challenge_hhduc.as_ref().and_then(HhdUcData::decode)
+    }
+}
+
 /// Type alias for `FetchOpts` — preferred name in the flow/public API.
 /// Both names refer to the same type from the workflow module.
 pub use crate::workflow::FetchOpts as FetchOptions;
@@ -207,6 +214,36 @@ impl Flow {
                 let done = matches!(other, FlowState::Done);
                 self.state = other;
                 if done { Err(FinTSError::Dialog("Flow already completed".into())) } else { Ok(()) }
+            }
+        }
+    }
+
+    /// Step 2 (TAN entry: chipTAN, photoTAN, smsTAN): send the TAN the user
+    /// entered for [`Flow::challenge`]; [`ChallengeInfo::media`] has the
+    /// flicker code or image to show first.
+    ///
+    /// On success the dialog is authenticated. If the bank rejects the TAN
+    /// the dialog is gone and the flow is finished; start over with
+    /// [`Flow::initiate`]. Decoupled challenges are confirmed in the app
+    /// instead: use [`Flow::await_decoupled`].
+    pub async fn submit_tan(&mut self, tan: &str) -> Result<()> {
+        match std::mem::replace(&mut self.state, FlowState::Done) {
+            FlowState::WaitingForTan { dialog, challenge } if !challenge.decoupled => {
+                let (open, _response) = dialog.submit_tan(&challenge.task_reference, tan).await?;
+                info!("[Flow] TAN accepted");
+                self.params = open.bank_params().clone();
+                self.state = FlowState::Authenticated { dialog: open };
+                Ok(())
+            }
+            FlowState::Done => Err(FinTSError::Dialog("Flow already completed".into())),
+            other => {
+                let decoupled = matches!(other, FlowState::WaitingForTan { .. });
+                self.state = other;
+                Err(FinTSError::Dialog(if decoupled {
+                    "decoupled TAN: confirm in the app and call await_decoupled()".into()
+                } else {
+                    "no TAN pending".into()
+                }))
             }
         }
     }

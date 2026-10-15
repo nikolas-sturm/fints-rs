@@ -59,7 +59,10 @@ impl FinTSConnection {
             encoded.len(),
             self.url
         );
-        trace!("Request (raw): {:?}", String::from_utf8_lossy(message_bytes));
+        trace!(
+            "Request (raw, PIN/TAN masked): {:?}",
+            String::from_utf8_lossy(&crate::debug::redact_credentials(message_bytes))
+        );
 
         // POST with Content-Type: text/plain
         let response = self

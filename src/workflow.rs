@@ -6,6 +6,7 @@
 //! Compile-time safety: workflow methods take typed dialog states.
 //! `fetch()` takes `Dialog<Open>` — you can't call it without authentication.
 
+use chrono::{Datelike, NaiveDate};
 use tracing::{info, warn};
 
 use crate::banks::BankConfig;
@@ -60,22 +61,43 @@ pub struct FetchOpts {
     pub transactions: bool,
     /// Fetch securities holdings (HKWPD). Default: true.
     pub holdings: bool,
-    /// Days of transaction history to fetch. Default: 90.
+    /// Days of transaction history to fetch, ending today. Ignored when
+    /// `from` is set.
     pub days: u32,
+    /// First day of the transaction window. Takes precedence over `days`;
+    /// use it for incremental syncs ("everything since the last booked day").
+    pub from: Option<NaiveDate>,
+    /// Last day of the transaction window. Default: today.
+    pub to: Option<NaiveDate>,
 }
 
 impl FetchOpts {
     /// Fetch everything: balance, transactions, and holdings.
     pub fn all(days: u32) -> Self {
-        Self { balance: true, transactions: true, holdings: true, days }
+        Self { balance: true, transactions: true, holdings: true, days, from: None, to: None }
     }
     /// Fetch only balance (single request, fast).
     pub fn balance_only() -> Self {
-        Self { balance: true, transactions: false, holdings: false, days: 0 }
+        Self { balance: true, transactions: false, holdings: false, days: 0, from: None, to: None }
     }
     /// Skip holdings (for accounts without a depot).
     pub fn no_holdings(days: u32) -> Self {
-        Self { balance: true, transactions: true, holdings: false, days }
+        Self { balance: true, transactions: true, holdings: false, days, from: None, to: None }
+    }
+    /// Fetch transactions for `from..=to` (`to` defaults to today) instead
+    /// of the last `days` days.
+    pub fn with_range(mut self, from: NaiveDate, to: Option<NaiveDate>) -> Self {
+        self.from = Some(from);
+        self.to = to;
+        self
+    }
+    /// The transaction window these options ask for, given today's date.
+    pub fn window(&self, today: NaiveDate) -> (NaiveDate, NaiveDate) {
+        let to = self.to.unwrap_or(today);
+        let from = self
+            .from
+            .unwrap_or_else(|| to - chrono::Duration::days(self.days.max(1) as i64));
+        (from.min(to), to)
     }
 }
 
@@ -300,15 +322,27 @@ pub async fn fetch_default(
     Ok(FetchResult { balance, transactions, holdings })
 }
 
-/// Fetch and parse all transaction pages (HKKAZ with touchdown pagination).
+/// Fetch and parse all transaction pages (HKKAZ with touchdown pagination)
+/// for the last `days` days.
 pub async fn fetch_transactions(
     tag: &str,
     dialog: &mut Dialog<Open>,
     account: &Account,
     days: u32,
 ) -> Result<Vec<Transaction>> {
-    let end_date = chrono::Local::now().date_naive();
-    let start_date = end_date - chrono::Duration::days(days.max(1) as i64);
+    let (start_date, end_date) = FetchOpts::all(days).window(chrono::Local::now().date_naive());
+    fetch_transactions_range(tag, dialog, account, start_date, end_date).await
+}
+
+/// Fetch and parse all transaction pages (HKKAZ with touchdown pagination)
+/// booked between `start_date` and `end_date`, both inclusive.
+pub async fn fetch_transactions_range(
+    tag: &str,
+    dialog: &mut Dialog<Open>,
+    account: &Account,
+    start_date: NaiveDate,
+    end_date: NaiveDate,
+) -> Result<Vec<Transaction>> {
     info!("[{}] Transactions {} to {}", tag, start_date, end_date);
 
     let mut all_booked = Mt940Data::new();
@@ -319,9 +353,9 @@ pub async fn fetch_transactions(
     loop {
         match dialog.transactions(account, start_date, end_date, touchdown.as_ref()).await? {
             TransactionResult::NeedTan(_) => {
-                return Err(FinTSError::Dialog(format!(
-                    "{tag}: the bank requires an additional TAN for transactions"
-                )));
+                // Typically more than 90 days of history without a fresh SCA.
+                warn!("[{}] The bank requires an additional TAN for transactions", tag);
+                return Err(FinTSError::TanRequired);
             }
             TransactionResult::Success(page) => {
                 pages += 1;
@@ -660,7 +694,8 @@ impl AnyBank {
         };
 
         let transactions = if opts.transactions {
-            fetch_transactions(&tag, dialog, account, opts.days).await?
+            let (from, to) = opts.window(chrono::Local::now().date_naive());
+            fetch_transactions_range(&tag, dialog, account, from, to).await?
         } else {
             Vec::new()
         };
@@ -721,42 +756,189 @@ fn parse_mt940(data: &[u8], status: TransactionStatus) -> Result<Vec<Transaction
         for line in msg.statement_lines {
             let is_debit = matches!(line.ext_debit_credit_indicator, mt940::ExtDebitOrCredit::Debit);
             let amount = if is_debit { -line.amount } else { line.amount };
-
-            let (applicant_name, applicant_iban, applicant_bic, purpose, posting_text) =
-                match &line.information_to_account_owner {
-                    Some(mt940::InformationToAccountOwner::Structured {
-                        applicant_name, applicant_iban, applicant_bin, purpose, posting_text, ..
-                    }) => (applicant_name.clone(), applicant_iban.clone(), applicant_bin.clone(), purpose.clone(), posting_text.clone()),
-                    Some(mt940::InformationToAccountOwner::Plain(text)) => (None, None, None, Some(text.clone()), None),
-                    None => (None, None, None, None, None),
-                };
+            let booking_date = booking_date(line.value_date, line.entry_date);
+            let details = Details::from(line.information_to_account_owner.as_ref());
 
             let raw = serde_json::json!({
-                "date": line.value_date.to_string(),
+                "value_date": line.value_date.to_string(),
                 "entry_date": line.entry_date.map(|d| d.to_string()),
+                "booking_date": booking_date.to_string(),
                 "amount": amount.to_string(),
                 "currency": msg.opening_balance.iso_currency_code,
                 "customer_ref": line.customer_ref,
                 "bank_ref": line.bank_ref,
-                "applicant_name": applicant_name,
-                "applicant_iban": applicant_iban,
-                "applicant_bic": applicant_bic,
-                "purpose": purpose,
-                "posting_text": posting_text,
+                "supplementary_details": line.supplementary_details,
+                "gvc": details.gvc,
+                "prima_nota": details.prima_nota,
+                "applicant_name": details.applicant_name,
+                "applicant_iban": details.applicant_iban,
+                "applicant_bic": details.applicant_bic,
+                "purpose": details.purpose,
+                "posting_text": details.posting_text,
             });
 
             transactions.push(Transaction {
-                date: line.value_date, valuta_date: line.entry_date,
+                date: booking_date,
+                valuta_date: Some(line.value_date),
                 amount,
                 currency: Currency::new(&msg.opening_balance.iso_currency_code),
-                applicant_name,
-                applicant_iban: applicant_iban.map(|s| Iban::new(s)),
-                applicant_bic: applicant_bic.map(|s| Bic::new(s)),
-                purpose, posting_text,
+                applicant_name: details.applicant_name,
+                applicant_iban: details.applicant_iban.map(Iban::new),
+                applicant_bic: details.applicant_bic.map(Bic::new),
+                purpose: details.purpose,
+                posting_text: details.posting_text,
                 reference: Some(line.customer_ref.clone()),
+                bank_reference: line.bank_ref.clone(),
+                gvc: details.gvc,
+                prima_nota: details.prima_nota,
                 raw, status: status.clone(),
             });
         }
     }
     Ok(transactions)
+}
+
+/// The booking date of an MT940 `:61:` line.
+///
+/// `:61:` carries the value date (YYMMDD) first and an optional entry date
+/// (MMDD, no year) second. The entry date is the booking date. The mt940
+/// crate gives it the value date's year, which is wrong across New Year
+/// (value 2025-12-31, entry 0102 must be 2026-01-02), so shift by a year
+/// when the two are more than half a year apart.
+fn booking_date(value_date: NaiveDate, entry_date: Option<NaiveDate>) -> NaiveDate {
+    let Some(entry) = entry_date else { return value_date };
+    let gap = (entry - value_date).num_days();
+    let year = if gap > 183 {
+        entry.year() - 1
+    } else if gap < -183 {
+        entry.year() + 1
+    } else {
+        return entry;
+    };
+    entry.with_year(year).unwrap_or(entry)
+}
+
+/// The parts of an MT940 `:86:` field that end up on a [`Transaction`].
+#[derive(Default)]
+struct Details {
+    gvc: Option<String>,
+    posting_text: Option<String>,
+    prima_nota: Option<String>,
+    purpose: Option<String>,
+    applicant_name: Option<String>,
+    applicant_iban: Option<String>,
+    applicant_bic: Option<String>,
+}
+
+impl From<Option<&mt940::InformationToAccountOwner>> for Details {
+    fn from(info: Option<&mt940::InformationToAccountOwner>) -> Self {
+        match info {
+            Some(mt940::InformationToAccountOwner::Structured {
+                transaction_code, posting_text, prima_nota, purpose, additional_purpose,
+                applicant_bin, applicant_iban, applicant_name, ..
+            }) => Details {
+                gvc: non_empty(Some(transaction_code.as_str())),
+                posting_text: non_empty(posting_text.as_deref()),
+                prima_nota: non_empty(prima_nota.as_deref()),
+                // ?60-?63 continue the ?20-?29 purpose lines; SEPA keywords
+                // (EREF+, SVWZ+, ...) can span both, so join without a separator.
+                purpose: non_empty(Some(&format!(
+                    "{}{}",
+                    purpose.as_deref().unwrap_or(""),
+                    additional_purpose.as_deref().unwrap_or("")
+                ))),
+                applicant_name: non_empty(applicant_name.as_deref()),
+                applicant_iban: non_empty(applicant_iban.as_deref()),
+                applicant_bic: non_empty(applicant_bin.as_deref()),
+            },
+            Some(mt940::InformationToAccountOwner::Plain(text)) => Details {
+                purpose: non_empty(Some(text)),
+                ..Details::default()
+            },
+            None => Details::default(),
+        }
+    }
+}
+
+fn non_empty(s: Option<&str>) -> Option<String> {
+    s.map(str::trim).filter(|s| !s.is_empty()).map(str::to_owned)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn d(y: i32, m: u32, day: u32) -> NaiveDate {
+        NaiveDate::from_ymd_opt(y, m, day).unwrap()
+    }
+
+    fn statement(lines: &[&str]) -> Vec<u8> {
+        let mut text = vec![":20:STARTUMS", ":25:12345678/0000001234", ":28C:0", ":60F:C251230EUR1000,00"];
+        text.extend_from_slice(lines);
+        text.push(":62F:C260102EUR987,50");
+        text.join("\r\n").into_bytes()
+    }
+
+    #[test]
+    fn booking_and_value_date_are_not_swapped() {
+        // Value date 2025-12-29, booked (entry date) 12-30.
+        let data = statement(&[
+            ":61:2512291230D12,50NDDTNONREF//BANKREF-1",
+            ":86:105?00SEPA-BASISLASTSCHRIFT?10931?20EREF+E2E-1MREF+M-42CRED+DE?2198ZZZ09999999999SVWZ+Beitrag?30DEUTDEFFXXX?31DE89370400440532013000?32Versicherung AG?60 Januar 2026",
+        ]);
+        let txs = parse_mt940(&data, TransactionStatus::Booked).unwrap();
+        assert_eq!(txs.len(), 1);
+        let tx = &txs[0];
+        assert_eq!(tx.date, d(2025, 12, 30), "date is the booking (entry) date");
+        assert_eq!(tx.valuta_date, Some(d(2025, 12, 29)), "valuta_date is the value date");
+        assert_eq!(tx.amount.to_string(), "-12.50");
+        assert_eq!(tx.gvc.as_deref(), Some("105"));
+        assert_eq!(tx.prima_nota.as_deref(), Some("931"));
+        assert_eq!(tx.posting_text.as_deref(), Some("SEPA-BASISLASTSCHRIFT"));
+        assert_eq!(tx.bank_reference.as_deref(), Some("BANKREF-1"));
+        assert_eq!(tx.reference.as_deref(), Some("NONREF"));
+        assert_eq!(tx.applicant_name.as_deref(), Some("Versicherung AG"));
+        assert_eq!(tx.applicant_iban.as_ref().map(|i| i.as_str()), Some("DE89370400440532013000"));
+        assert_eq!(tx.applicant_bic.as_ref().map(|b| b.as_str()), Some("DEUTDEFFXXX"));
+        // ?20-?29 and ?60 joined without separators, so the creditor id split
+        // across ?20/?21 comes out whole.
+        assert_eq!(
+            tx.purpose.as_deref(),
+            Some("EREF+E2E-1MREF+M-42CRED+DE98ZZZ09999999999SVWZ+Beitrag Januar 2026")
+        );
+    }
+
+    #[test]
+    fn missing_entry_date_falls_back_to_value_date() {
+        let data = statement(&[":61:251230C100,00NMSCNONREF", ":86:166?00GUTSCHRIFT?20Miete"]);
+        let tx = &parse_mt940(&data, TransactionStatus::Booked).unwrap()[0];
+        assert_eq!(tx.date, d(2025, 12, 30));
+        assert_eq!(tx.valuta_date, Some(d(2025, 12, 30)));
+        assert_eq!(tx.gvc.as_deref(), Some("166"));
+        assert_eq!(tx.purpose.as_deref(), Some("Miete"));
+    }
+
+    #[test]
+    fn entry_date_across_new_year() {
+        // Value 2025-12-31, booked 01-02: the booking is in 2026.
+        assert_eq!(booking_date(d(2025, 12, 31), Some(d(2025, 1, 2))), d(2026, 1, 2));
+        // Value 2026-01-02, booked 12-31: the booking was in 2025.
+        assert_eq!(booking_date(d(2026, 1, 2), Some(d(2026, 12, 31))), d(2025, 12, 31));
+        // Same year: unchanged.
+        assert_eq!(booking_date(d(2026, 3, 1), Some(d(2026, 2, 27))), d(2026, 2, 27));
+        assert_eq!(booking_date(d(2026, 3, 1), None), d(2026, 3, 1));
+    }
+
+    #[test]
+    fn fetch_window() {
+        let today = d(2026, 10, 15);
+        assert_eq!(FetchOpts::all(30).window(today), (d(2026, 9, 15), today));
+        let ranged = FetchOpts::all(30).with_range(d(2026, 1, 1), Some(d(2026, 6, 30)));
+        assert_eq!(ranged.window(today), (d(2026, 1, 1), d(2026, 6, 30)));
+        let open_ended = FetchOpts::no_holdings(0).with_range(d(2026, 10, 1), None);
+        assert_eq!(open_ended.window(today), (d(2026, 10, 1), today));
+        // A start after the end is clamped rather than sent to the bank.
+        let inverted = FetchOpts::all(0).with_range(d(2026, 11, 1), Some(d(2026, 10, 1)));
+        assert_eq!(inverted.window(today), (d(2026, 10, 1), d(2026, 10, 1)));
+    }
 }

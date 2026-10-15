@@ -1,4 +1,5 @@
-//! Decoupled TAN (pushTAN) polling against a scripted bank.
+//! TAN handling against a scripted bank: decoupled (pushTAN) polling and
+//! TAN entry through `Flow::submit_tan`.
 //!
 //! A tiny HTTP server answers each FinTS request with the next canned
 //! response, so we can drive `Dialog::await_decoupled` through 3955 → 3956 …
@@ -236,4 +237,84 @@ async fn respects_bank_wait_before_first_poll() {
         .unwrap();
     assert!(started.elapsed() >= Duration::from_millis(900), "bank's 1s minimum wait must be honored");
     assert!(waits[0] > Duration::from_millis(900) && waits[0] <= Duration::from_secs(1));
+}
+
+// ── TAN entry (chipTAN / photoTAN / smsTAN) through Flow ──────────────────
+
+const BPD_MOBILE_TAN: &str = "HIBPA:6:3:4+78+280:12345678+Test Bank+1+1+300+500'\
+    HIKAZS:10:7:4+1+1+1+365:J:N'HISALS:19:7:4+1+1+1'\
+    HITANS:53:5:4+1+1+1+N:N:0:942:2:MTAN2:mobileTAN::mobile TAN:6:1:SMS:3:1:J:1:0:N:0:2:N:J:00:1:1'\
+    HIPINS:54:1:4+1+1+1+5:20:6:Benutzer ID::HKKAZ:N:HKSAL:N:HKTAN:N'";
+const UPD_ONE_ACCOUNT: &str = "HIUPA:57:4:4+test1+3+0'\
+    HIUPD:58:6:4+1::280:12345678+DE111234567800000001+test1+1+EUR+Fullname++Girokonto++HKSAL:1'";
+const INIT_TAN_SENT: &str = "HIRMG:2:2+0010::Nachricht entgegengenommen'\
+    HIRMS:3:2:4+0030::Auftrag empfangen - Sicherheitsfreigabe erforderlich'\
+    HITAN:4:5:4+4++TASK-7+Bitte geben Sie die TAN ein'";
+
+/// Saved state with a mobileTAN-only BPD, so `Flow::initiate` skips the sync
+/// dialog and goes straight to the TAN challenge.
+fn saved_state() -> fints::SessionState {
+    let json = serde_json::json!({
+        "format": 1,
+        "blz": "12345678",
+        "user_id": "test1",
+        "system_id": "SYS;001",
+        "bpd_version": 78,
+        "upd_version": 3,
+        "bpd": BPD_MOBILE_TAN,
+        "upd": UPD_ONE_ACCOUNT,
+        "tan_method": "942",
+        "tan_medium": null,
+        "allowed_security_functions": ["942"],
+        "updated_at": "2026-10-15T00:00:00Z",
+    });
+    fints::SessionState::from_json(&json.to_string()).unwrap()
+}
+
+async fn flow_waiting_for_tan(responses: Vec<&'static str>) -> (fints::Flow, Arc<Mutex<Vec<String>>>) {
+    let (url, log) = scripted_bank(responses).await;
+    let bank = fints::bank_ops_with_config(fints::BankConfig::new("Test Bank", "12345678", "GENODE23X42", url));
+    let (flow, info) = fints::Flow::initiate_with_bank(
+        bank, &UserId::new("test1"), &Pin::new("12345"), &ProductId::new("P"), Some(&saved_state()), None, None,
+    )
+    .await
+    .expect("initiate");
+    assert!(flow.needs_tan() && !info.decoupled, "expected a TAN-entry challenge: {info:?}");
+    assert_eq!(info.challenge.as_str(), "Bitte geben Sie die TAN ein");
+    (flow, log)
+}
+
+#[tokio::test]
+async fn submit_tan_authenticates_the_flow() {
+    let (mut flow, log) = flow_waiting_for_tan(vec![INIT_TAN_SENT, CONFIRMED]).await;
+    flow.submit_tan("654321").await.expect("TAN accepted");
+    assert!(!flow.needs_tan());
+
+    let sent = log.lock().unwrap().last().cloned().unwrap();
+    assert!(sent.contains("HKTAN:") && sent.contains("TASK-7"), "process 2 for the task: {sent}");
+    assert!(sent.contains("12345:654321"), "PIN and TAN go into HNSHA: {sent}");
+    assert_eq!(flow.accounts().len(), 1);
+}
+
+#[tokio::test]
+async fn rejected_tan_ends_the_flow() {
+    let (mut flow, _log) = flow_waiting_for_tan(vec![INIT_TAN_SENT, EXPIRED]).await;
+    assert!(flow.submit_tan("000000").await.is_err());
+    let again = flow.submit_tan("000000").await.expect_err("flow is finished");
+    assert!(again.to_string().contains("already completed"), "{again}");
+}
+
+#[tokio::test]
+async fn submit_tan_refuses_decoupled_challenges() {
+    let (url, _log) = scripted_bank(vec![INIT_PUSH_SENT]).await;
+    let bank = fints::bank_ops_with_config(fints::BankConfig::new("Test Bank", "12345678", "GENODE23X42", url));
+    let (mut flow, info) = fints::Flow::initiate_with_bank(
+        bank, &UserId::new("test1"), &Pin::new("12345"), &ProductId::new("P"), Some(&saved_state()), None, None,
+    )
+    .await
+    .expect("initiate");
+    assert!(info.decoupled);
+    let err = flow.submit_tan("123456").await.expect_err("decoupled needs await_decoupled");
+    assert!(err.to_string().contains("await_decoupled"), "{err}");
+    assert!(flow.needs_tan(), "the challenge is still pending");
 }
