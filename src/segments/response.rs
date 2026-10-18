@@ -226,6 +226,7 @@ pub(crate) fn parse_hispa(seg: &RawSegment) -> Vec<SepaAccount> {
             owner: None,
             product_name: None,
             currency: None,
+            account_type: None,
         });
     }
 
@@ -234,8 +235,10 @@ pub(crate) fn parse_hispa(seg: &RawSegment) -> Vec<SepaAccount> {
 
 /// Parse HIUPD (User Parameter Data) for account info including owner/product name.
 pub(crate) fn parse_hiupd(seg: &RawSegment) -> Option<SepaAccount> {
-    // HIUPD: DEG1=header, DEG2=account(KTO), DEG3=customer_id, DEG4=upd_usage, DEG5=account_type?,
-    //        DEG6=currency?, DEG7=owner_name1, DEG8=owner_name2?, DEG9=product_name?
+    // HIUPD v6 (DEG index after the header): 1 account (KTV), 2 IBAN,
+    // 3 customer id, 4 account type (Kontoart), 5 currency, 6/7 owner names,
+    // 8 product name, 9 limit, 10+ allowed business transactions. The
+    // account type is only read from v6, whose layout is checked here.
     if seg.deg_count() < 3 {
         return None;
     }
@@ -268,6 +271,11 @@ pub(crate) fn parse_hiupd(seg: &RawSegment) -> Option<SepaAccount> {
     let owner = read_opt_str(seg, 6, 0).or_else(|| read_opt_str(seg, 7, 0));
     let product_name = read_opt_str(seg, 8, 0).or_else(|| read_opt_str(seg, 9, 0));
     let currency = read_opt_str(seg, 5, 0);
+    let account_type = (seg.segment_version() >= 6)
+        .then(|| read_opt_str(seg, 4, 0))
+        .flatten()
+        .and_then(|t| t.parse::<u8>().ok())
+        .filter(|t| (1..=99).contains(t));
 
     Some(SepaAccount {
         iban: Iban::new(iban),
@@ -278,6 +286,7 @@ pub(crate) fn parse_hiupd(seg: &RawSegment) -> Option<SepaAccount> {
         owner,
         product_name,
         currency: currency.map(Currency::new),
+        account_type,
     })
 }
 
@@ -920,6 +929,24 @@ mod tests {
         assert_eq!(acc.owner.as_deref(), Some("Fullname"));
         assert_eq!(acc.product_name.as_deref(), Some("Girokonto"));
         assert_eq!(acc.currency.as_ref().map(|c| c.as_str()), Some("EUR"));
+        assert_eq!(acc.account_type, None);
+    }
+
+    #[test]
+    fn test_parse_hiupd_account_type() {
+        let depot = parse_segment("HIUPD:59:6:4+9876543::280:12345678++test1+30+EUR+Fullname++Depot++HKWPD:1'");
+        let acc = parse_hiupd(&depot).unwrap();
+        assert_eq!(acc.account_type, Some(30));
+        assert_eq!(acc.account_class(), Some(AccountClass::Depot));
+
+        let giro = parse_segment("HIUPD:58:6:4+1::280:12345678+DE111234567800000001+test1+1+EUR+Fullname++Girokonto++HKSAL:1'");
+        assert_eq!(parse_hiupd(&giro).unwrap().account_class(), Some(AccountClass::Checking));
+
+        let card = parse_segment("HIUPD:60:6:4+4111::280:12345678++test1+50+EUR+Fullname++Kreditkarte++HKSAL:1'");
+        assert_eq!(parse_hiupd(&card).unwrap().account_class(), Some(AccountClass::CreditCard));
+
+        let bogus = parse_segment("HIUPD:61:6:4+2::280:12345678++test1+abc+EUR'");
+        assert_eq!(parse_hiupd(&bogus).unwrap().account_type, None);
     }
 
     // ── Response code helpers ──────────────────────────────────────────

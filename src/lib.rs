@@ -66,7 +66,7 @@ pub use flow::{Flow, ChallengeInfo, SyncResult, FetchOptions};
 
 // Workflow layer
 pub use workflow::{BankOps, AnyBank, Dkb, Ing, GenericBank, bank_ops, bank_ops_with_config};
-pub use workflow::{initiate_default, fetch_default, fetch_transactions, fetch_holdings_default};
+pub use workflow::{initiate_default, fetch_default, fetch_transactions, fetch_transactions_range, fetch_holdings_default};
 pub use workflow::{InitiateOutcome, InitiateResult, InitiateNoTanResult, FetchResult, FetchOpts};
 
 // Protocol layer
@@ -81,12 +81,12 @@ pub use protocol::{
 
 // Domain types
 pub use types::{
-    AccountBalance, SepaAccount, Transaction, TransactionStatus, TanMethod,
+    AccountBalance, AccountClass, SepaAccount, Transaction, TransactionStatus, TanMethod,
     SecurityHolding, Isin, Wkn,
     Blz, UserId, Pin, SystemId, ProductId, DialogId, SecurityFunction,
     TaskReference, SegmentType, TanMediumName, TouchdownPoint, SegmentRef,
     Currency, Iban, Bic, TanProcess, ResponseCodeKind, ResponseCode,
-    BankName, FinTSUrl, ChallengeText, HhdUcData, Mt940Data,
+    BankName, FinTSUrl, ChallengeText, HhdUcData, TanMedia, Mt940Data,
 };
 pub use error::{FinTSError, Result};
 pub use session::SessionState;

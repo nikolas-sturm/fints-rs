@@ -41,6 +41,7 @@ pub struct DecodedMessage {
 
 /// Parse raw bytes into a [`DecodedMessage`].
 pub fn decode_message(data: &[u8]) -> Result<DecodedMessage, FinTSError> {
+    let data = &redact_credentials(data);
     let raw_segments = parse_message(data)?;
     let raw_bytes = data.len();
 
@@ -194,6 +195,7 @@ pub fn hex_dump(data: &[u8]) -> String {
 
 /// Combine a label + optional hex dump + decoded segments.
 pub fn format_wire_log(label: &str, data: &[u8], verbosity: VerbosityLevel) -> String {
+    let data = &redact_credentials(data);
     let mut out = String::new();
     out.push_str(&format!("=== {} ({} bytes) ===\n", label, data.len()));
 
@@ -207,6 +209,45 @@ pub fn format_wire_log(label: &str, data: &[u8], verbosity: VerbosityLevel) -> S
         Err(e) => out.push_str(&format!("  [parse error: {}]\n", e)),
     }
 
+    out
+}
+
+/// Mask PIN and TAN in a FinTS message for logging and display.
+///
+/// Both travel in the user-defined signature of HNSHA
+/// (`HNSHA:n:2+<ref>++<PIN>[:<TAN>]'`), which sits as plain bytes inside the
+/// HNVSD envelope. Every byte of that element becomes `*` except the `:`
+/// separator; the length stays the same, so `@len@` binary headers still
+/// match and the result still parses.
+pub fn redact_credentials(message: &[u8]) -> Vec<u8> {
+    const TAG: &[u8] = b"HNSHA:";
+    let mut out = message.to_vec();
+    let mut i = 0;
+    while let Some(pos) = out[i..].windows(TAG.len()).position(|w| w == TAG) {
+        let mut j = i + pos + TAG.len();
+        let mut element = 0; // data elements are separated by unescaped '+'
+        while j < out.len() {
+            match out[j] {
+                b'\'' => break,
+                b'+' => element += 1,
+                b':' if element >= 3 => {}
+                b'?' => {
+                    // Escape: the next byte is literal.
+                    if element >= 3 {
+                        out[j] = b'*';
+                        if let Some(next) = out.get_mut(j + 1) {
+                            *next = b'*';
+                        }
+                    }
+                    j += 1;
+                }
+                _ if element >= 3 => out[j] = b'*',
+                _ => {}
+            }
+            j += 1;
+        }
+        i = j;
+    }
     out
 }
 
@@ -240,6 +281,32 @@ fn de_to_display_string(de: &DataElement, seg_type: &str, verbosity: VerbosityLe
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn redacts_pin_and_tan_inside_the_envelope() {
+        let inner = "HNSHK:2:4+PIN:2+942+123+1+1+2::SYS+1+1:999:1+6:10:16+280:12345678:user:S:0:0'\
+                     HKIDN:3:2+280:12345678+user+SYS+1'\
+                     HNSHA:4:2+123++ge?+heim:654321'";
+        let message = format!(
+            "HNHBK:1:3+000000000000+300+0+1'HNVSK:998:3+PIN:2+998+1+1::SYS+1:20260101:120000+2:2:13:@8@00000000:5:1+280:12345678:user:V:0:0+0'\
+             HNVSD:999:1+@{}@{}'HNHBS:5:1+1'",
+            inner.len(),
+            inner
+        );
+        let redacted = redact_credentials(message.as_bytes());
+        let text = String::from_utf8_lossy(&redacted);
+        assert_eq!(redacted.len(), message.len());
+        assert!(!text.contains("heim") && !text.contains("654321"), "{text}");
+        assert!(text.contains("HNSHA:4:2+123++********:******'"), "{text}");
+        assert!(text.contains("HKIDN:3:2+280:12345678+user+SYS+1'"), "other segments untouched");
+        assert!(decode_message(message.as_bytes()).is_ok(), "still parses after masking");
+    }
+
+    #[test]
+    fn redaction_leaves_messages_without_hnsha_alone() {
+        let data = b"HIRMG:3:2+0010::Nachricht entgegengenommen.'HNHBS:4:1+1'";
+        assert_eq!(redact_credentials(data), data.to_vec());
+    }
 
     #[test]
     fn test_decode_simple_message() {

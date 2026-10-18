@@ -75,6 +75,53 @@ newtype_string!(/// TAN challenge text to display to the user.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct HhdUcData(pub Vec<u8>);
 
+/// What a TAN challenge's HHD-UC data carries, ready for a UI to render.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub enum TanMedia {
+    /// photoTAN / QR-TAN: an image (usually PNG) to show to the TAN app or reader.
+    Image { mime_type: String, data: Vec<u8> },
+    /// chipTAN optical (HHD 1.4 flicker code): the challenge data as the bank
+    /// sent it; a flicker renderer turns it into the animation.
+    Flicker(String),
+}
+
+impl HhdUcData {
+    /// Decode the challenge data.
+    ///
+    /// Matrix codes (photoTAN, QR-TAN) are laid out as a 2-byte big-endian
+    /// MIME type length, the MIME type, a 2-byte big-endian image length and
+    /// the image. Printable ASCII that isn't a matrix code is an HHD flicker
+    /// code. Anything else yields `None`.
+    pub fn decode(&self) -> Option<TanMedia> {
+        let b = self.0.as_slice();
+        if let Some(media) = Self::decode_matrix(b) {
+            return Some(media);
+        }
+        let printable = !b.is_empty() && b.iter().all(|c| (0x20..0x7f).contains(c));
+        printable.then(|| TanMedia::Flicker(String::from_utf8_lossy(b).trim().to_string()))
+    }
+
+    fn decode_matrix(b: &[u8]) -> Option<TanMedia> {
+        let be16 = |at: usize| -> Option<usize> {
+            Some(usize::from(u16::from_be_bytes([*b.get(at)?, *b.get(at + 1)?])))
+        };
+        let mime_len = be16(0)?;
+        let mime = b.get(2..2 + mime_len)?;
+        let looks_like_mime = (3..=100).contains(&mime_len)
+            && mime.contains(&b'/')
+            && mime.iter().all(|c| c.is_ascii_graphic());
+        if !looks_like_mime {
+            return None;
+        }
+        let data_len = be16(2 + mime_len)?;
+        let data = b.get(4 + mime_len..4 + mime_len + data_len)?;
+        Some(TanMedia::Image {
+            mime_type: String::from_utf8_lossy(mime).into_owned(),
+            data: data.to_vec(),
+        })
+    }
+}
+
 /// MT940/SWIFT binary data (WINDOWS-1252 encoded).
 #[derive(Debug, Clone)]
 pub struct Mt940Data(pub Vec<u8>);
@@ -609,6 +656,60 @@ pub struct SepaAccount {
     pub owner: Option<String>,
     pub product_name: Option<String>,
     pub currency: Option<Currency>,
+    /// "Kontoart" from the UPD (HIUPD v6), 1-99. See [`SepaAccount::account_class`].
+    #[serde(default)]
+    pub account_type: Option<u8>,
+}
+
+impl SepaAccount {
+    /// What kind of account this is, from the UPD account type ranges the
+    /// FinTS specification defines. `None` when the bank doesn't say.
+    pub fn account_class(&self) -> Option<AccountClass> {
+        AccountClass::from_account_type(self.account_type?)
+    }
+}
+
+/// Account type ranges ("Kontoart") of the FinTS UPD.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub enum AccountClass {
+    /// 1-9: Kontokorrent / Girokonto.
+    Checking,
+    /// 10-19: Sparkonto.
+    Savings,
+    /// 20-29: Festgeld / Termineinlage.
+    FixedDeposit,
+    /// 30-39: Wertpapierdepot.
+    Depot,
+    /// 40-49: Kredit / Darlehen.
+    Loan,
+    /// 50-59: Kreditkarte.
+    CreditCard,
+    /// 60-69: Fonds-Depot bei einer Kapitalanlagegesellschaft.
+    FundDepot,
+    /// 70-79: Bausparvertrag.
+    HomeSavings,
+    /// 80-89: Versicherungsvertrag.
+    Insurance,
+    /// 90-99: Sonstige.
+    Other,
+}
+
+impl AccountClass {
+    pub fn from_account_type(account_type: u8) -> Option<Self> {
+        Some(match account_type {
+            1..=9 => Self::Checking,
+            10..=19 => Self::Savings,
+            20..=29 => Self::FixedDeposit,
+            30..=39 => Self::Depot,
+            40..=49 => Self::Loan,
+            50..=59 => Self::CreditCard,
+            60..=69 => Self::FundDepot,
+            70..=79 => Self::HomeSavings,
+            80..=89 => Self::Insurance,
+            90..=99 => Self::Other,
+            _ => return None,
+        })
+    }
 }
 
 /// Account balance.
@@ -675,17 +776,82 @@ pub struct SecurityHolding {
 /// A parsed transaction.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Transaction {
+    /// Booking date (Buchungstag): the MT940 entry date, or the value date
+    /// when the bank leaves the entry date out.
     pub date: NaiveDate,
+    /// Value date (Valuta, Wertstellung).
     pub valuta_date: Option<NaiveDate>,
+    /// Signed from the account holder's view: negative = debit.
     pub amount: Decimal,
     pub currency: Currency,
     pub applicant_name: Option<String>,
     pub applicant_iban: Option<Iban>,
     pub applicant_bic: Option<Bic>,
+    /// Purpose text: `:86:` subfields ?20-?29 and ?60-?63 joined as sent,
+    /// so SEPA keywords (`EREF+`, `MREF+`, `CRED+`, `SVWZ+`) stay intact.
     pub purpose: Option<String>,
+    /// Booking text (Buchungstext), e.g. "SEPA-BASISLASTSCHRIFT".
     pub posting_text: Option<String>,
+    /// Customer reference from `:61:`, often "NONREF".
     pub reference: Option<String>,
+    /// Bank reference from `:61:` (after `//`), if the bank sends one.
+    #[serde(default)]
+    pub bank_reference: Option<String>,
+    /// Geschäftsvorfallcode (GVC): the three-digit business transaction
+    /// code from `:86:`, e.g. `166` for an incoming SEPA credit transfer.
+    #[serde(default)]
+    pub gvc: Option<String>,
+    /// Primanota number from `:86:` ?10.
+    #[serde(default)]
+    pub prima_nota: Option<String>,
     pub raw: serde_json::Value,
     /// Whether this transaction is booked or pending.
     pub status: TransactionStatus,
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn decodes_phototan_matrix() {
+        let png = [0x89, b'P', b'N', b'G', 1, 2, 3];
+        let mut raw = vec![0, 9];
+        raw.extend_from_slice(b"image/png");
+        raw.extend_from_slice(&(png.len() as u16).to_be_bytes());
+        raw.extend_from_slice(&png);
+        assert_eq!(
+            HhdUcData(raw).decode(),
+            Some(TanMedia::Image { mime_type: "image/png".into(), data: png.to_vec() })
+        );
+    }
+
+    #[test]
+    fn decodes_flicker_code() {
+        let raw = b"0388A01239230520422070812345678904".to_vec();
+        assert_eq!(
+            HhdUcData(raw).decode(),
+            Some(TanMedia::Flicker("0388A01239230520422070812345678904".into()))
+        );
+    }
+
+    #[test]
+    fn rejects_truncated_or_binary_garbage() {
+        // Claims a 9-byte MIME type and a 100-byte image, but stops early.
+        let mut raw = vec![0, 9];
+        raw.extend_from_slice(b"image/png");
+        raw.extend_from_slice(&[0, 100, 1, 2]);
+        assert_eq!(HhdUcData(raw).decode(), None);
+        assert_eq!(HhdUcData(vec![]).decode(), None);
+    }
+
+    #[test]
+    fn account_classes() {
+        assert_eq!(AccountClass::from_account_type(1), Some(AccountClass::Checking));
+        assert_eq!(AccountClass::from_account_type(10), Some(AccountClass::Savings));
+        assert_eq!(AccountClass::from_account_type(39), Some(AccountClass::Depot));
+        assert_eq!(AccountClass::from_account_type(55), Some(AccountClass::CreditCard));
+        assert_eq!(AccountClass::from_account_type(0), None);
+        assert_eq!(AccountClass::from_account_type(100), None);
+    }
 }

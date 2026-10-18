@@ -18,6 +18,10 @@ A pure Rust implementation of the **FinTS 3.0** (formerly HBCI) banking protocol
 - Quirk layer with hbci4java's message rewriters for misbehaving banks
 - Built-in registry of 1700+ German banks with FinTS endpoints (updated 20.05.2026)
 - Account balance, transaction history (MT940), and securities/depot holdings (MT535)
+- Transactions with booking and value date, GVC, prima nota, bank reference and the
+  full SEPA purpose (`EREF+`, `MREF+`, `CRED+`, `SVWZ+` kept intact)
+- TAN entry for chipTAN/photoTAN/smsTAN, with photoTAN images and flicker codes decoded
+- PIN and TAN masked in logs and debug output
 - CLI client for interactive banking from the terminal
 - Mock server for integration testing
 - Debug & audit tooling for protocol inspection
@@ -65,7 +69,8 @@ async fn main() -> fints::Result<()> {
         saved.as_ref(), None, None,
     ).await?;
 
-    // Step 2: if the bank wants a pushTAN, wait for the app confirmation.
+    // Step 2: SCA. pushTAN: wait for the app confirmation.
+    //         chipTAN/photoTAN/smsTAN: show _info.media(), then submit the TAN.
     if flow.needs_tan() {
         flow.await_decoupled(CancellationToken::new(), &DecoupledOptions::default(), |event| {
             if let DecoupledEvent::AwaitingConfirmation { challenge } = event {
@@ -106,6 +111,14 @@ Notes:
   announced intervals and stops on confirmation, a bank error, the bank's maximum
   number of polls, `DecoupledOptions::timeout`, or the `CancellationToken`. Run it in
   a background task (`Flow` is `Send`) and never block an HTTP request on a pushTAN.
+- **TAN entry.** For non-decoupled methods, `ChallengeInfo::media()` returns the
+  photoTAN/QR image or the chipTAN flicker code to show, and `flow.submit_tan(tan)`
+  authenticates the dialog. A rejected TAN ends the flow; start over with `initiate`.
+- **Date ranges.** `FetchOpts::all(days)` fetches the last `days` days;
+  `.with_range(from, to)` fetches an explicit window, e.g. for incremental syncs.
+  `Transaction::date` is the booking date and `valuta_date` the value date.
+- **Errors.** `FinTSError::is_credentials_error()` (never retry: wrong PINs lock the
+  login), `needs_user()` (a TAN is needed) and `is_retryable()` classify failures.
 - **One-shot helpers.** `confirm_and_fetch(iban, bic, days)` still exists: it polls
   the TAN status once, fetches one account and ends the dialog.
 

@@ -169,6 +169,9 @@ fn sync_result_serde_roundtrip() {
         purpose: Some("Rechnung".to_string()),
         posting_text: None,
         reference: Some("REF-123".to_string()),
+        bank_reference: None,
+        gvc: Some("166".to_string()),
+        prima_nota: None,
         raw: serde_json::json!({"date": "2025-01-15"}),
         status: TransactionStatus::Booked,
     };

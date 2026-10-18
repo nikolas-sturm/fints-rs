@@ -1481,8 +1481,6 @@ async fn cmd_transactions(cli: &Cli, args: &TransactionsArgs) -> Result<(), Stri
         .transpose()?
         .unwrap_or(today);
 
-    let days = (to_date - from_date).num_days().max(1) as u32;
-
     let (iban, bic) = resolve_iban_bic_from_args(
         args.iban.as_deref(),
         args.bic.as_deref(),
@@ -1503,7 +1501,7 @@ async fn cmd_transactions(cli: &Cli, args: &TransactionsArgs) -> Result<(), Stri
     wait_for_tan(cli, &mut flow).await?;
 
     let result = flow
-        .confirm_and_fetch(&iban, &bic, days)
+        .confirm_and_fetch_opts(&iban, &bic, &FetchOpts::no_holdings(0).with_range(from_date, Some(to_date)))
         .await
         .map_err(|e| map_fints_error(&e))?;
     persist_state(cli, &session_name, existing_session.as_ref(), &flow)?;
@@ -1610,7 +1608,7 @@ async fn cmd_holdings(cli: &Cli, args: &HoldingsArgs) -> Result<(), String> {
 
     // Use confirm_and_fetch_opts with holdings-only fetch for efficiency
     let result = flow
-        .confirm_and_fetch_opts(&iban, &bic, &FetchOpts { balance: false, transactions: false, holdings: true, days: 0 })
+        .confirm_and_fetch_opts(&iban, &bic, &FetchOpts { balance: false, transactions: false, holdings: true, ..FetchOpts::default() })
         .await
         .map_err(|e| map_fints_error(&e))?;
     persist_state(cli, &session_name, existing_session.as_ref(), &flow)?;
