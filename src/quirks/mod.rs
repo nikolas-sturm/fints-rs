@@ -65,7 +65,9 @@ pub struct QuirkChain {
 
 impl std::fmt::Debug for QuirkChain {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.debug_list().entries(self.quirks.iter().map(|q| q.name())).finish()
+        f.debug_list()
+            .entries(self.quirks.iter().map(|q| q.name()))
+            .finish()
     }
 }
 
@@ -162,7 +164,9 @@ pub(crate) fn unwrap_envelope(msg: &[u8]) -> Vec<u8> {
             b"HNVSK" => {}
             b"HNVSD" => {
                 let degs = wire::degs(seg);
-                let payload = degs.get(1).and_then(|d| wire::binary_payload(&seg[d.clone()]));
+                let payload = degs
+                    .get(1)
+                    .and_then(|d| wire::binary_payload(&seg[d.clone()]));
                 match payload {
                     Some(inner) => out.extend_from_slice(inner),
                     None => out.extend_from_slice(seg),
@@ -178,12 +182,17 @@ pub(crate) fn unwrap_envelope(msg: &[u8]) -> Vec<u8> {
 mod tests {
     use super::*;
 
-    const CTX: QuirkContext<'static> = QuirkContext { hbci_version: "300", dialog_id: "DLG", message_number: 2 };
+    const CTX: QuirkContext<'static> = QuirkContext {
+        hbci_version: "300",
+        dialog_id: "DLG",
+        message_number: 2,
+    };
 
     #[test]
     fn unwrap_envelope_flattens_hnvsd() {
         let inner = b"HNSHK:2:4+PIN:1'HIRMG:3:2+0010::ok'";
-        let mut msg = b"HNHBK:1:3+000000000100+300+DLG+2+DLG:2'HNVSK:998:3+PIN:1'HNVSD:999:1+@".to_vec();
+        let mut msg =
+            b"HNHBK:1:3+000000000100+300+DLG+2+DLG:2'HNVSK:998:3+PIN:1'HNVSD:999:1+@".to_vec();
         msg.extend_from_slice(inner.len().to_string().as_bytes());
         msg.push(b'@');
         msg.extend_from_slice(inner);
@@ -205,8 +214,14 @@ mod tests {
         assert_eq!(
             QuirkChain::hbci4java().names(),
             [
-                "InvalidSegment", "WrongStatusSegOrder", "WrongSequenceNumbers", "MissingMsgRef",
-                "HBCIVersion", "SigIdLeadingZero", "InvalidSuppHBCIVersion", "SecTypeTAN",
+                "InvalidSegment",
+                "WrongStatusSegOrder",
+                "WrongSequenceNumbers",
+                "MissingMsgRef",
+                "HBCIVersion",
+                "SigIdLeadingZero",
+                "InvalidSuppHBCIVersion",
+                "SecTypeTAN",
             ]
         );
     }

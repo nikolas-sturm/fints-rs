@@ -98,7 +98,16 @@ impl Flow {
         target_iban: Option<&Iban>,
         target_bic: Option<&Bic>,
     ) -> Result<(Self, ChallengeInfo)> {
-        Self::initiate_inner(bank, username, pin, product_id, session, target_iban, target_bic).await
+        Self::initiate_inner(
+            bank,
+            username,
+            pin,
+            product_id,
+            session,
+            target_iban,
+            target_bic,
+        )
+        .await
     }
 
     /// Step 1: initiate connection by BLZ, get TAN challenge.
@@ -115,7 +124,16 @@ impl Flow {
         target_bic: Option<&Bic>,
     ) -> Result<(Self, ChallengeInfo)> {
         let bank = bank_ops(bank_id)?;
-        Self::initiate_inner(bank, username, pin, product_id, session, target_iban, target_bic).await
+        Self::initiate_inner(
+            bank,
+            username,
+            pin,
+            product_id,
+            session,
+            target_iban,
+            target_bic,
+        )
+        .await
     }
 
     async fn initiate_inner(
@@ -127,9 +145,9 @@ impl Flow {
         target_iban: Option<&Iban>,
         target_bic: Option<&Bic>,
     ) -> Result<(Self, ChallengeInfo)> {
-        let outcome = bank.initiate(
-            username, pin, product_id, session, target_iban, target_bic,
-        ).await?;
+        let outcome = bank
+            .initiate(username, pin, product_id, session, target_iban, target_bic)
+            .await?;
         let blz = bank.config().blz.clone();
 
         match outcome {
@@ -166,7 +184,9 @@ impl Flow {
                 };
                 let flow = Flow {
                     bank,
-                    state: FlowState::Authenticated { dialog: result.dialog },
+                    state: FlowState::Authenticated {
+                        dialog: result.dialog,
+                    },
                     blz,
                     user_id: username.clone(),
                     system_id: result.system_id,
@@ -204,7 +224,9 @@ impl Flow {
     ) -> Result<()> {
         match std::mem::replace(&mut self.state, FlowState::Done) {
             FlowState::WaitingForTan { dialog, challenge } => {
-                let (open, _response) = dialog.await_decoupled(&challenge, cancel, opts, on_event).await?;
+                let (open, _response) = dialog
+                    .await_decoupled(&challenge, cancel, opts, on_event)
+                    .await?;
                 info!("[Flow] Decoupled TAN confirmed");
                 self.params = open.bank_params().clone();
                 self.state = FlowState::Authenticated { dialog: open };
@@ -213,7 +235,11 @@ impl Flow {
             other => {
                 let done = matches!(other, FlowState::Done);
                 self.state = other;
-                if done { Err(FinTSError::Dialog("Flow already completed".into())) } else { Ok(()) }
+                if done {
+                    Err(FinTSError::Dialog("Flow already completed".into()))
+                } else {
+                    Ok(())
+                }
             }
         }
     }
@@ -349,7 +375,8 @@ impl Flow {
         bic: &str,
         days: u32,
     ) -> Result<SyncResult> {
-        self.confirm_and_fetch_opts(iban, bic, &FetchOpts::all(days)).await
+        self.confirm_and_fetch_opts(iban, bic, &FetchOpts::all(days))
+            .await
     }
 
     /// Like [`Flow::confirm_and_fetch`] with fine-grained fetch control.
@@ -366,8 +393,10 @@ impl Flow {
         self.end_dialog().await;
         let fetch = fetch?;
         Ok(SyncResult {
-            iban: Iban::new(iban), bic: Bic::new(bic),
-            balance: fetch.balance, transactions: fetch.transactions,
+            iban: Iban::new(iban),
+            bic: Bic::new(bic),
+            balance: fetch.balance,
+            transactions: fetch.transactions,
             holdings: fetch.holdings,
             system_id: Some(self.system_id.clone()),
         })
@@ -389,7 +418,9 @@ impl Flow {
         result
     }
 
-    pub fn system_id(&self) -> &SystemId { &self.system_id }
+    pub fn system_id(&self) -> &SystemId {
+        &self.system_id
+    }
 
     /// Resolve account with bank's BIC as fallback; prefer the UPD entry for
     /// this IBAN so the bank's own account number is used for national formats.
@@ -397,7 +428,11 @@ impl Flow {
         let bank_bic = self.bank.config().bic.as_str();
         if let Some(acc) = self.accounts().iter().find(|a| a.iban.as_str() == iban) {
             let acc = SepaAccount {
-                bic: Bic::new(if bic.is_empty() { acc.bic.as_str() } else { bic }),
+                bic: Bic::new(if bic.is_empty() {
+                    acc.bic.as_str()
+                } else {
+                    bic
+                }),
                 ..acc.clone()
             };
             return Account::from_sepa(&acc, bank_bic);

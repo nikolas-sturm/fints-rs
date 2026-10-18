@@ -338,7 +338,11 @@ pub(crate) fn hktan(segment_number: u16, version: u16, req: &HktanRequest<'_>) -
     if version == 5 {
         degs.push(deg1(de_empty())); // TAN list index
     }
-    degs.push(deg1(req.further_tan_follows.map(de_bool).unwrap_or_else(de_empty)));
+    degs.push(deg1(
+        req.further_tan_follows
+            .map(de_bool)
+            .unwrap_or_else(de_empty),
+    ));
     degs.push(deg1(de_empty())); // storno
     degs.push(deg1(de_empty())); // SMS charge account
     degs.push(deg1(de_empty())); // challenge class
@@ -354,13 +358,17 @@ pub(crate) fn hktan_process4(
     segment_type: &str,
     tan_medium_name: Option<&str>,
 ) -> Result<Vec<DEG>> {
-    hktan(segment_number, version, &HktanRequest {
-        process: "4",
-        segment_ref: Some(segment_type),
-        task_reference: None,
-        further_tan_follows: None,
-        tan_medium: tan_medium_name,
-    })
+    hktan(
+        segment_number,
+        version,
+        &HktanRequest {
+            process: "4",
+            segment_ref: Some(segment_type),
+            task_reference: None,
+            further_tan_follows: None,
+            tan_medium: tan_medium_name,
+        },
+    )
 }
 
 /// Build HKTAN for process 2 (submit TAN) — completing a two-step operation.
@@ -370,13 +378,17 @@ pub(crate) fn hktan_process2(
     task_reference: &str,
     tan_medium_name: Option<&str>,
 ) -> Result<Vec<DEG>> {
-    hktan(segment_number, version, &HktanRequest {
-        process: "2",
-        segment_ref: None,
-        task_reference: Some(task_reference),
-        further_tan_follows: Some(false),
-        tan_medium: tan_medium_name,
-    })
+    hktan(
+        segment_number,
+        version,
+        &HktanRequest {
+            process: "2",
+            segment_ref: None,
+            task_reference: Some(task_reference),
+            further_tan_follows: Some(false),
+            tan_medium: tan_medium_name,
+        },
+    )
 }
 
 /// Build HKTAN for process S (decoupled status poll).
@@ -386,13 +398,17 @@ pub(crate) fn hktan_process_s(
     task_reference: &str,
     tan_medium_name: Option<&str>,
 ) -> Result<Vec<DEG>> {
-    hktan(segment_number, version, &HktanRequest {
-        process: "S",
-        segment_ref: None,
-        task_reference: Some(task_reference),
-        further_tan_follows: Some(false),
-        tan_medium: tan_medium_name,
-    })
+    hktan(
+        segment_number,
+        version,
+        &HktanRequest {
+            process: "S",
+            segment_ref: None,
+            task_reference: Some(task_reference),
+            further_tan_follows: Some(false),
+            tan_medium: tan_medium_name,
+        },
+    )
 }
 
 // ---- HKTAB (TAN-Medium anfordern) - TAN Media List Request, version 4/5 ----
@@ -431,8 +447,8 @@ pub(crate) fn hksal(
     Ok(vec![
         seg_header("HKSAL", segment_number, version),
         acct,
-        deg1(de_bool(false)),               // all accounts
-        deg1(de_empty()),                   // max entries
+        deg1(de_bool(false)),                   // all accounts
+        deg1(de_empty()),                       // max entries
         deg1(de_text(touchdown.unwrap_or(""))), // touchdown point
     ])
 }
@@ -514,14 +530,19 @@ mod tests {
 
     #[test]
     fn kti_serializes_as_iban_colon_bic() {
-        let bytes = crate::serializer::serialize_deg(&kti(&account(), "HKSAL", 7).unwrap()).unwrap();
+        let bytes =
+            crate::serializer::serialize_deg(&kti(&account(), "HKSAL", 7).unwrap()).unwrap();
         assert_eq!(String::from_utf8(bytes).unwrap(), format!("{IBAN}:{BIC}"));
     }
 
     #[test]
     fn ktv_derives_number_and_blz_from_german_iban() {
-        let bytes = crate::serializer::serialize_deg(&ktv(&account(), "HKSAL", 6).unwrap()).unwrap();
-        assert_eq!(String::from_utf8(bytes).unwrap(), "1084174299::280:12030000");
+        let bytes =
+            crate::serializer::serialize_deg(&ktv(&account(), "HKSAL", 6).unwrap()).unwrap();
+        assert_eq!(
+            String::from_utf8(bytes).unwrap(),
+            "1084174299::280:12030000"
+        );
     }
 
     #[test]
@@ -533,8 +554,12 @@ mod tests {
 
     #[test]
     fn national_only_account_builds_ktv_but_not_kti() {
-        let depot = Account::national("0012345678", None, &Blz::new("50010517"), "INGDDEFFXXX").unwrap();
-        assert_eq!(wire(hkwpd(3, 6, &depot, None, None).unwrap()), "HKWPD:3:6+0012345678::280:50010517'");
+        let depot =
+            Account::national("0012345678", None, &Blz::new("50010517"), "INGDDEFFXXX").unwrap();
+        assert_eq!(
+            wire(hkwpd(3, 6, &depot, None, None).unwrap()),
+            "HKWPD:3:6+0012345678::280:50010517'"
+        );
         assert!(hksal(3, 7, &depot, None).is_err());
     }
 
@@ -542,22 +567,34 @@ mod tests {
 
     #[test]
     fn hksal_v5_wire_format() {
-        assert_eq!(wire(hksal(3, 5, &account(), None).unwrap()), "HKSAL:3:5+1084174299::280:12030000+N'");
+        assert_eq!(
+            wire(hksal(3, 5, &account(), None).unwrap()),
+            "HKSAL:3:5+1084174299::280:12030000+N'"
+        );
     }
 
     #[test]
     fn hksal_v6_wire_format() {
-        assert_eq!(wire(hksal(3, 6, &account(), None).unwrap()), "HKSAL:3:6+1084174299::280:12030000+N'");
+        assert_eq!(
+            wire(hksal(3, 6, &account(), None).unwrap()),
+            "HKSAL:3:6+1084174299::280:12030000+N'"
+        );
     }
 
     #[test]
     fn hksal_v7_wire_format() {
-        assert_eq!(wire(hksal(3, 7, &account(), None).unwrap()), format!("HKSAL:3:7+{IBAN}:{BIC}+N'"));
+        assert_eq!(
+            wire(hksal(3, 7, &account(), None).unwrap()),
+            format!("HKSAL:3:7+{IBAN}:{BIC}+N'")
+        );
     }
 
     #[test]
     fn hksal_v8_wire_format() {
-        assert_eq!(wire(hksal(3, 8, &account(), None).unwrap()), format!("HKSAL:3:8+{IBAN}:{BIC}+N'"));
+        assert_eq!(
+            wire(hksal(3, 8, &account(), None).unwrap()),
+            format!("HKSAL:3:8+{IBAN}:{BIC}+N'")
+        );
     }
 
     #[test]
@@ -579,25 +616,45 @@ mod tests {
     #[test]
     fn hkkaz_v5_wire_format() {
         let degs = hkkaz(3, 5, &account(), date(2025, 3, 29), date(2026, 3, 29), None).unwrap();
-        assert_eq!(wire(degs), "HKKAZ:3:5+1084174299::280:12030000+N+20250329+20260329'");
+        assert_eq!(
+            wire(degs),
+            "HKKAZ:3:5+1084174299::280:12030000+N+20250329+20260329'"
+        );
     }
 
     #[test]
     fn hkkaz_v6_wire_format() {
         let degs = hkkaz(3, 6, &account(), date(2025, 3, 29), date(2026, 3, 29), None).unwrap();
-        assert_eq!(wire(degs), "HKKAZ:3:6+1084174299::280:12030000+N+20250329+20260329'");
+        assert_eq!(
+            wire(degs),
+            "HKKAZ:3:6+1084174299::280:12030000+N+20250329+20260329'"
+        );
     }
 
     #[test]
     fn hkkaz_v7_wire_format() {
         let degs = hkkaz(3, 7, &account(), date(2025, 3, 29), date(2026, 3, 29), None).unwrap();
-        assert_eq!(wire(degs), format!("HKKAZ:3:7+{IBAN}:{BIC}+N+20250329+20260329'"));
+        assert_eq!(
+            wire(degs),
+            format!("HKKAZ:3:7+{IBAN}:{BIC}+N+20250329+20260329'")
+        );
     }
 
     #[test]
     fn hkkaz_v7_with_touchdown() {
-        let degs = hkkaz(3, 7, &account(), date(2025, 3, 29), date(2026, 3, 29), Some("4711")).unwrap();
-        assert_eq!(wire(degs), format!("HKKAZ:3:7+{IBAN}:{BIC}+N+20250329+20260329++4711'"));
+        let degs = hkkaz(
+            3,
+            7,
+            &account(),
+            date(2025, 3, 29),
+            date(2026, 3, 29),
+            Some("4711"),
+        )
+        .unwrap();
+        assert_eq!(
+            wire(degs),
+            format!("HKKAZ:3:7+{IBAN}:{BIC}+N+20250329+20260329++4711'")
+        );
     }
 
     #[test]
@@ -609,12 +666,18 @@ mod tests {
 
     #[test]
     fn hkwpd_v5_wire_format() {
-        assert_eq!(wire(hkwpd(3, 5, &account(), None, None).unwrap()), "HKWPD:3:5+1084174299::280:12030000'");
+        assert_eq!(
+            wire(hkwpd(3, 5, &account(), None, None).unwrap()),
+            "HKWPD:3:5+1084174299::280:12030000'"
+        );
     }
 
     #[test]
     fn hkwpd_v6_wire_format() {
-        assert_eq!(wire(hkwpd(3, 6, &account(), None, None).unwrap()), "HKWPD:3:6+1084174299::280:12030000'");
+        assert_eq!(
+            wire(hkwpd(3, 6, &account(), None, None).unwrap()),
+            "HKWPD:3:6+1084174299::280:12030000'"
+        );
     }
 
     #[test]
@@ -643,7 +706,10 @@ mod tests {
 
     #[test]
     fn hktan_v7_process4_wire_format() {
-        assert_eq!(wire(hktan_process4(4, 7, "HKIDN", None).unwrap()), "HKTAN:4:7+4+HKIDN'");
+        assert_eq!(
+            wire(hktan_process4(4, 7, "HKIDN", None).unwrap()),
+            "HKTAN:4:7+4+HKIDN'"
+        );
     }
 
     #[test]
@@ -656,18 +722,27 @@ mod tests {
 
     #[test]
     fn hktan_v6_process_s_wire_format() {
-        assert_eq!(wire(hktan_process_s(3, 6, "REF-1", None).unwrap()), "HKTAN:3:6+S++++REF-1+N'");
+        assert_eq!(
+            wire(hktan_process_s(3, 6, "REF-1", None).unwrap()),
+            "HKTAN:3:6+S++++REF-1+N'"
+        );
     }
 
     #[test]
     fn hktan_v7_process2_wire_format() {
-        assert_eq!(wire(hktan_process2(3, 7, "REF-1", None).unwrap()), "HKTAN:3:7+2++++REF-1+N'");
+        assert_eq!(
+            wire(hktan_process2(3, 7, "REF-1", None).unwrap()),
+            "HKTAN:3:7+2++++REF-1+N'"
+        );
     }
 
     #[test]
     fn hktan_v5_has_list_index_field() {
         // v5 inserts the TAN list index between order reference and "further TAN follows".
-        assert_eq!(wire(hktan_process2(3, 5, "REF-1", None).unwrap()), "HKTAN:3:5+2++++REF-1++N'");
+        assert_eq!(
+            wire(hktan_process2(3, 5, "REF-1", None).unwrap()),
+            "HKTAN:3:5+2++++REF-1++N'"
+        );
         assert_eq!(
             wire(hktan_process4(3, 5, "HKIDN", Some("Handy")).unwrap()),
             "HKTAN:3:5+4+HKIDN++++++++++Handy'"

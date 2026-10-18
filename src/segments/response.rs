@@ -58,13 +58,55 @@ struct HitansLayout {
 
 fn hitans_layout(version: u16) -> HitansLayout {
     match version {
-        1 => HitansLayout { prefix: 4, stride: 11, zka_name: None, name: 3, needs_tan_medium: None, decoupled: None },
-        2 => HitansLayout { prefix: 3, stride: 15, zka_name: None, name: 3, needs_tan_medium: None, decoupled: None },
-        3 => HitansLayout { prefix: 3, stride: 18, zka_name: None, name: 3, needs_tan_medium: Some(16), decoupled: None },
-        4 | 5 => HitansLayout { prefix: 3, stride: 22, zka_name: Some(3), name: 5, needs_tan_medium: Some(20), decoupled: None },
-        6 => HitansLayout { prefix: 3, stride: 21, zka_name: Some(3), name: 5, needs_tan_medium: Some(18), decoupled: None },
+        1 => HitansLayout {
+            prefix: 4,
+            stride: 11,
+            zka_name: None,
+            name: 3,
+            needs_tan_medium: None,
+            decoupled: None,
+        },
+        2 => HitansLayout {
+            prefix: 3,
+            stride: 15,
+            zka_name: None,
+            name: 3,
+            needs_tan_medium: None,
+            decoupled: None,
+        },
+        3 => HitansLayout {
+            prefix: 3,
+            stride: 18,
+            zka_name: None,
+            name: 3,
+            needs_tan_medium: Some(16),
+            decoupled: None,
+        },
+        4 | 5 => HitansLayout {
+            prefix: 3,
+            stride: 22,
+            zka_name: Some(3),
+            name: 5,
+            needs_tan_medium: Some(20),
+            decoupled: None,
+        },
+        6 => HitansLayout {
+            prefix: 3,
+            stride: 21,
+            zka_name: Some(3),
+            name: 5,
+            needs_tan_medium: Some(18),
+            decoupled: None,
+        },
         // v7 and anything newer we don't know yet: v7 layout is the best guess.
-        _ => HitansLayout { prefix: 3, stride: 26, zka_name: Some(3), name: 5, needs_tan_medium: Some(18), decoupled: Some(21) },
+        _ => HitansLayout {
+            prefix: 3,
+            stride: 26,
+            zka_name: Some(3),
+            name: 5,
+            needs_tan_medium: Some(18),
+            decoupled: Some(21),
+        },
     }
 }
 
@@ -96,9 +138,18 @@ pub(crate) fn parse_hitans(seg: &RawSegment) -> Vec<TanMethod> {
         let mut has_decoupled_fields = false;
         if let Some(d) = layout.decoupled {
             let num = |i: usize| field(d + i).parse::<i32>().ok();
-            if let Some(v) = num(0) { max_polls = v; has_decoupled_fields = true; }
-            if let Some(v) = num(1) { wait_first = v; has_decoupled_fields = true; }
-            if let Some(v) = num(2) { wait_next = v; has_decoupled_fields = true; }
+            if let Some(v) = num(0) {
+                max_polls = v;
+                has_decoupled_fields = true;
+            }
+            if let Some(v) = num(1) {
+                wait_first = v;
+                has_decoupled_fields = true;
+            }
+            if let Some(v) = num(2) {
+                wait_next = v;
+                has_decoupled_fields = true;
+            }
             auto_polling = match field(d + 4).as_str() {
                 "J" => Some(true),
                 "N" => Some(false),
@@ -108,11 +159,17 @@ pub(crate) fn parse_hitans(seg: &RawSegment) -> Vec<TanMethod> {
         // hbci4java (HHDVersion.DECOUPLED) keys on the DK method name "Decoupled*";
         // the v7 decoupled timing fields are only filled for decoupled methods.
         let is_decoupled = version >= 7
-            && (zka_name.as_deref().is_some_and(|z| z.to_ascii_lowercase().starts_with("decouple"))
+            && (zka_name
+                .as_deref()
+                .is_some_and(|z| z.to_ascii_lowercase().starts_with("decouple"))
                 || has_decoupled_fields);
 
         methods.push(TanMethod {
-            name: if name.is_empty() { format!("TAN-{}", security_function) } else { name },
+            name: if name.is_empty() {
+                format!("TAN-{}", security_function)
+            } else {
+                name
+            },
             security_function: SecurityFunction::new(security_function),
             tan_process: TanProcess::from_str_val(&field(1)),
             needs_tan_medium,
@@ -150,7 +207,11 @@ pub(crate) fn parse_hitan(seg: &RawSegment) -> Hitan {
         challenge.clear();
     }
     let challenge_hhduc = read_binary(seg, 5, 0).filter(|b| !b.is_empty());
-    Hitan { task_reference, challenge, challenge_hhduc }
+    Hitan {
+        task_reference,
+        challenge,
+        challenge_hhduc,
+    }
 }
 
 /// Parse HITAB (TAN media list response).
@@ -760,10 +821,16 @@ mod tests {
     // ── HITANS / HITAN (TAN2StepPar*, TAN2StepRes*) ───────────────────
 
     /// One HITANS v7 method group (26 DEs, TAN2StepParams7).
-    fn hitans7_method(sf: &str, zka: &str, name: &str, medium: &str, decoupled: [&str; 5]) -> String {
+    fn hitans7_method(
+        sf: &str,
+        zka: &str,
+        name: &str,
+        medium: &str,
+        decoupled: [&str; 5],
+    ) -> String {
         let mut f: Vec<&str> = vec![
-            sf, "2", "id", zka, "", name, "", "", "Freigabe", "2048", "N", "2", "N", "0", "0",
-            "N", "N", "00", medium, "N", "1",
+            sf, "2", "id", zka, "", name, "", "", "Freigabe", "2048", "N", "2", "N", "0", "0", "N",
+            "N", "00", medium, "N", "1",
         ];
         f.extend_from_slice(&decoupled);
         assert_eq!(f.len(), 26);
@@ -774,7 +841,13 @@ mod tests {
     fn test_parse_hitans_v7_decoupled_and_classic() {
         let raw = format!(
             "HITANS:170:7:4+1+1+1+N:N:0:{}:{}'",
-            hitans7_method("902", "Decoupled", "pushTAN 2.0", "2", ["180", "3", "2", "J", "J"]),
+            hitans7_method(
+                "902",
+                "Decoupled",
+                "pushTAN 2.0",
+                "2",
+                ["180", "3", "2", "J", "J"]
+            ),
             hitans7_method("912", "HHD", "chipTAN", "0", ["", "", "", "", ""]),
         );
         let methods = parse_hitans(&parse_segment(&raw));
@@ -803,7 +876,13 @@ mod tests {
     fn test_parse_hitans_v7_zero_max_polls_means_unlimited() {
         let raw = format!(
             "HITANS:170:7:4+1+1+1+J:N:0:{}'",
-            hitans7_method("940", "DecoupledPush", "App", "1", ["0", "5", "5", "N", "N"]),
+            hitans7_method(
+                "940",
+                "DecoupledPush",
+                "App",
+                "1",
+                ["0", "5", "5", "N", "N"]
+            ),
         );
         let m = &parse_hitans(&parse_segment(&raw))[0];
         assert!(m.is_decoupled);
@@ -819,12 +898,17 @@ mod tests {
             910:2:HHD1.3.0:HHD:1.3.0:chipTAN manuell:6:1:TAN-Nummer:3:J:2:N:0:0:N:N:00:0:N:1:\
             911:2:HHD1.3.2OPT:HHDOPT1:1.3.2:chipTAN optisch:6:1:TAN-Nummer:3:J:2:N:0:0:N:N:00:2:N:1'";
         let methods = parse_hitans(&parse_segment(raw));
-        let sfs: Vec<_> = methods.iter().map(|m| m.security_function.as_str()).collect();
+        let sfs: Vec<_> = methods
+            .iter()
+            .map(|m| m.security_function.as_str())
+            .collect();
         assert_eq!(sfs, ["910", "911"]);
         assert_eq!(methods[1].name, "chipTAN optisch");
         assert!(!methods[0].needs_tan_medium);
         assert!(methods[1].needs_tan_medium);
-        assert!(methods.iter().all(|m| !m.is_decoupled && m.hktan_version == 6));
+        assert!(methods
+            .iter()
+            .all(|m| !m.is_decoupled && m.hktan_version == 6));
     }
 
     #[test]
@@ -832,8 +916,18 @@ mod tests {
         // Fixture from python-fints' conftest (22 DEs per method).
         let raw = "HITANS:53:5:4+1+1+1+J:N:0:942:2:MTAN2:mobileTAN::mobile TAN:6:1:SMS:3:1:J:1:0:N:0:2:N:J:00:1:1:962:2:HHD1.4:HHD:1.4:Smart-TAN plus manuell:6:1:Challenge:3:1:J:1:0:N:0:2:N:J:00:1:1:972:2:HHD1.4OPT:HHDOPT1:1.4:Smart-TAN plus optisch:6:1:Challenge:3:1:J:1:0:N:0:2:N:J:00:1:1'";
         let methods = parse_hitans(&parse_segment(raw));
-        let names: Vec<_> = methods.iter().map(|m| (m.security_function.as_str(), m.name.as_str())).collect();
-        assert_eq!(names, [("942", "mobile TAN"), ("962", "Smart-TAN plus manuell"), ("972", "Smart-TAN plus optisch")]);
+        let names: Vec<_> = methods
+            .iter()
+            .map(|m| (m.security_function.as_str(), m.name.as_str()))
+            .collect();
+        assert_eq!(
+            names,
+            [
+                ("942", "mobile TAN"),
+                ("962", "Smart-TAN plus manuell"),
+                ("972", "Smart-TAN plus optisch")
+            ]
+        );
     }
 
     /// Real-bank HITANS from hbci4java's test resources (LGPL, see NOTICE).
@@ -854,41 +948,82 @@ mod tests {
         assert!(fixtures.len() >= 10);
         for (src, seg) in &fixtures {
             let methods = parse_hitans(seg);
-            assert!(!methods.is_empty(), "{src} v{}: no methods", seg.segment_version());
+            assert!(
+                !methods.is_empty(),
+                "{src} v{}: no methods",
+                seg.segment_version()
+            );
             for m in &methods {
                 // Misaligned groups show up as non-numeric security functions.
                 let sf = m.security_function.as_str();
-                assert!(sf.len() == 3 && sf.bytes().all(|b| b.is_ascii_digit()),
-                    "{src} v{}: bad security function {sf:?} ({})", seg.segment_version(), m.name);
+                assert!(
+                    sf.len() == 3 && sf.bytes().all(|b| b.is_ascii_digit()),
+                    "{src} v{}: bad security function {sf:?} ({})",
+                    seg.segment_version(),
+                    m.name
+                );
                 assert!(!m.name.starts_with("TAN-"), "{src}: missing name for {sf}");
-                assert_eq!(m.is_decoupled, m.zka_name.as_deref().is_some_and(|z| z.starts_with("Decoupled")),
-                    "{src}: decoupled flag for {sf}");
+                assert_eq!(
+                    m.is_decoupled,
+                    m.zka_name
+                        .as_deref()
+                        .is_some_and(|z| z.starts_with("Decoupled")),
+                    "{src}: decoupled flag for {sf}"
+                );
             }
         }
     }
 
     #[test]
     fn test_parse_hitans_hbci4java_decoupled_params() {
-        let all: Vec<TanMethod> = hbci4java_hitans().iter().flat_map(|(_, s)| parse_hitans(s)).collect();
-        let find = |sf: &str, v: u16| all.iter().find(|m| m.security_function.as_str() == sf && m.hktan_version == v).unwrap();
+        let all: Vec<TanMethod> = hbci4java_hitans()
+            .iter()
+            .flat_map(|(_, s)| parse_hitans(s))
+            .collect();
+        let find = |sf: &str, v: u16| {
+            all.iter()
+                .find(|m| m.security_function.as_str() == sf && m.hktan_version == v)
+                .unwrap()
+        };
 
         // DKB (bpd-ptsecmech-dkb.txt): "DKB App", decoupled, 999 polls, 1s/1s.
         let dkb = find("940", 7);
         assert_eq!(dkb.name, "DKB App");
         assert!(dkb.is_decoupled);
-        assert_eq!((dkb.decoupled_max_polls, dkb.wait_before_first_poll, dkb.wait_before_next_poll), (999, 1, 1));
+        assert_eq!(
+            (
+                dkb.decoupled_max_polls,
+                dkb.wait_before_first_poll,
+                dkb.wait_before_next_poll
+            ),
+            (999, 1, 1)
+        );
 
         // Deutsche Bank (bpd-deutschebank.txt): photoTAN-Push, 60 polls, 5s/5s, auto polling allowed.
         let db = find("903", 7);
         assert_eq!(db.name, "photoTAN-Push");
-        assert_eq!((db.decoupled_max_polls, db.wait_before_first_poll, db.wait_before_next_poll), (60, 5, 5));
+        assert_eq!(
+            (
+                db.decoupled_max_polls,
+                db.wait_before_first_poll,
+                db.wait_before_next_poll
+            ),
+            (60, 5, 5)
+        );
         assert_eq!(db.decoupled_auto_polling, Some(true));
 
         // Sparkasse-style pushTAN 2.0 (bpd-vop.txt): 180 polls, 1s/1s, TAN medium required.
         let push = find("922", 7);
         assert_eq!(push.name, "pushTAN 2.0");
         assert!(push.needs_tan_medium);
-        assert_eq!((push.decoupled_max_polls, push.wait_before_first_poll, push.wait_before_next_poll), (180, 1, 1));
+        assert_eq!(
+            (
+                push.decoupled_max_polls,
+                push.wait_before_first_poll,
+                push.wait_before_next_poll
+            ),
+            (180, 1, 1)
+        );
 
         // Classic chipTAN in the same BPDs stays non-decoupled.
         assert!(!find("910", 6).is_decoupled);
@@ -896,7 +1031,12 @@ mod tests {
 
     #[test]
     fn test_parse_hitans_garbage_does_not_panic() {
-        for raw in ["HITANS:1:7:4'", "HITANS:1:7:4+1+1+1+J'", "HITANS:1:99:4+1+1+1+J:N:0:900'", "HITANS:1:1:4+x'"] {
+        for raw in [
+            "HITANS:1:7:4'",
+            "HITANS:1:7:4+1+1+1+J'",
+            "HITANS:1:99:4+1+1+1+J:N:0:900'",
+            "HITANS:1:1:4+x'",
+        ] {
             let _ = parse_hitans(&parse_segment(raw));
         }
     }
@@ -934,16 +1074,26 @@ mod tests {
 
     #[test]
     fn test_parse_hiupd_account_type() {
-        let depot = parse_segment("HIUPD:59:6:4+9876543::280:12345678++test1+30+EUR+Fullname++Depot++HKWPD:1'");
+        let depot = parse_segment(
+            "HIUPD:59:6:4+9876543::280:12345678++test1+30+EUR+Fullname++Depot++HKWPD:1'",
+        );
         let acc = parse_hiupd(&depot).unwrap();
         assert_eq!(acc.account_type, Some(30));
         assert_eq!(acc.account_class(), Some(AccountClass::Depot));
 
         let giro = parse_segment("HIUPD:58:6:4+1::280:12345678+DE111234567800000001+test1+1+EUR+Fullname++Girokonto++HKSAL:1'");
-        assert_eq!(parse_hiupd(&giro).unwrap().account_class(), Some(AccountClass::Checking));
+        assert_eq!(
+            parse_hiupd(&giro).unwrap().account_class(),
+            Some(AccountClass::Checking)
+        );
 
-        let card = parse_segment("HIUPD:60:6:4+4111::280:12345678++test1+50+EUR+Fullname++Kreditkarte++HKSAL:1'");
-        assert_eq!(parse_hiupd(&card).unwrap().account_class(), Some(AccountClass::CreditCard));
+        let card = parse_segment(
+            "HIUPD:60:6:4+4111::280:12345678++test1+50+EUR+Fullname++Kreditkarte++HKSAL:1'",
+        );
+        assert_eq!(
+            parse_hiupd(&card).unwrap().account_class(),
+            Some(AccountClass::CreditCard)
+        );
 
         let bogus = parse_segment("HIUPD:61:6:4+2::280:12345678++test1+abc+EUR'");
         assert_eq!(parse_hiupd(&bogus).unwrap().account_type, None);
@@ -1173,7 +1323,10 @@ mod tests {
         let holdings = parse_hiwpd(&[parse_segment(&raw)]);
         assert_eq!(holdings.len(), 1);
         assert_eq!(holdings[0].name, "DEUTSCHE BANK AG");
-        assert_eq!(holdings[0].market_value, Some(rust_decimal::Decimal::from(425)));
+        assert_eq!(
+            holdings[0].market_value,
+            Some(rust_decimal::Decimal::from(425))
+        );
         assert_eq!(holdings[0].depot_id.as_deref(), Some("42"));
     }
 

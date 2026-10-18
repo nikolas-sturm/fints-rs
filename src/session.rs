@@ -122,17 +122,23 @@ impl SessionState {
     pub fn reset(&mut self) {
         let fresh = Self::new(&self.blz, &self.user_id);
         let (tan_method, tan_medium) = (self.tan_method.take(), self.tan_medium.take());
-        *self = Self { tan_method, tan_medium, ..fresh };
+        *self = Self {
+            tan_method,
+            tan_medium,
+            ..fresh
+        };
     }
 
     /// Serialize to JSON.
     pub fn to_json(&self) -> Result<String> {
-        serde_json::to_string(self).map_err(|e| FinTSError::Serialize(format!("session state: {e}")))
+        serde_json::to_string(self)
+            .map_err(|e| FinTSError::Serialize(format!("session state: {e}")))
     }
 
     /// Deserialize from JSON produced by [`SessionState::to_json`].
     pub fn from_json(json: &str) -> Result<Self> {
-        let state: Self = serde_json::from_str(json).map_err(|e| FinTSError::Parse(format!("session state: {e}")))?;
+        let state: Self = serde_json::from_str(json)
+            .map_err(|e| FinTSError::Parse(format!("session state: {e}")))?;
         if state.format > SESSION_STATE_FORMAT {
             return Err(FinTSError::Parse(format!(
                 "session state format {} is newer than supported ({})",
@@ -149,8 +155,16 @@ impl SessionState {
         params.set_upd(self.upd.clone());
         // Versions are what we announce in HKVVB; keep the stored ones even if
         // a segment was lost, so the bank resends rather than us guessing.
-        params.bpd_version = if self.bpd.is_empty() { 0 } else { self.bpd_version };
-        params.upd_version = if self.upd.is_empty() { 0 } else { self.upd_version };
+        params.bpd_version = if self.bpd.is_empty() {
+            0
+        } else {
+            self.bpd_version
+        };
+        params.upd_version = if self.upd.is_empty() {
+            0
+        } else {
+            self.upd_version
+        };
         params.allowed_security_functions = self.allowed_security_functions.clone();
         params.preferred_security_function = self.tan_method.clone();
         params.selected_tan_medium = self.tan_medium.clone();
@@ -159,7 +173,12 @@ impl SessionState {
     }
 
     /// Capture the state after a dialog.
-    pub(crate) fn capture(blz: &Blz, user_id: &UserId, system_id: &SystemId, params: &BankParams) -> Self {
+    pub(crate) fn capture(
+        blz: &Blz,
+        user_id: &UserId,
+        system_id: &SystemId,
+        params: &BankParams,
+    ) -> Self {
         let (user_id, previous_user_id) = match &params.changed_user_id {
             Some(new_id) if new_id != user_id => (new_id.clone(), Some(user_id.clone())),
             _ => (user_id.clone(), None),
@@ -174,7 +193,8 @@ impl SessionState {
             upd_version: params.upd_version,
             bpd: params.bpd_segments.clone(),
             upd: params.upd_segments.clone(),
-            tan_method: Some(params.selected_security_function.clone()).filter(|sf| *sf != pin_only),
+            tan_method: Some(params.selected_security_function.clone())
+                .filter(|sf| *sf != pin_only),
             tan_medium: params.selected_tan_medium.clone(),
             allowed_security_functions: params.allowed_security_functions.clone(),
             previous_user_id,
@@ -189,19 +209,29 @@ mod wire_segments {
     use super::*;
     use serde::{Deserializer, Serializer};
 
-    pub fn serialize<S: Serializer>(segments: &[RawSegment], s: S) -> std::result::Result<S::Ok, S::Error> {
+    pub fn serialize<S: Serializer>(
+        segments: &[RawSegment],
+        s: S,
+    ) -> std::result::Result<S::Ok, S::Error> {
         let mut out = Vec::new();
         for seg in segments {
-            out.extend(serializer::serialize_segment(&seg.degs).map_err(serde::ser::Error::custom)?);
+            out.extend(
+                serializer::serialize_segment(&seg.degs).map_err(serde::ser::Error::custom)?,
+            );
         }
         s.serialize_str(&out.iter().map(|&b| b as char).collect::<String>())
     }
 
-    pub fn deserialize<'de, D: Deserializer<'de>>(d: D) -> std::result::Result<Vec<RawSegment>, D::Error> {
+    pub fn deserialize<'de, D: Deserializer<'de>>(
+        d: D,
+    ) -> std::result::Result<Vec<RawSegment>, D::Error> {
         let text = String::deserialize(d)?;
         let bytes = text
             .chars()
-            .map(|c| u8::try_from(u32::from(c)).map_err(|_| serde::de::Error::custom("non-Latin-1 char in segment data")))
+            .map(|c| {
+                u8::try_from(u32::from(c))
+                    .map_err(|_| serde::de::Error::custom("non-Latin-1 char in segment data"))
+            })
             .collect::<std::result::Result<Vec<u8>, _>>()?;
         parser::parse_message(&bytes).map_err(serde::de::Error::custom)
     }
@@ -230,14 +260,20 @@ mod tests {
     #[test]
     fn capture_and_restore_roundtrip_through_json() {
         let state = SessionState::capture(
-            &Blz::new("12345678"), &UserId::new("test1"), &SystemId::new("SYS;001"), &params(),
+            &Blz::new("12345678"),
+            &UserId::new("test1"),
+            &SystemId::new("SYS;001"),
+            &params(),
         );
         assert_eq!((state.bpd_version, state.upd_version), (78, 3));
         assert_eq!(state.tan_method, Some(SecurityFunction::new("942")));
         assert!(state.can_skip_sync());
 
         let json = state.to_json().unwrap();
-        assert!(json.contains("HIBPA:6:3:4+78"), "BPD is stored in wire format: {json}");
+        assert!(
+            json.contains("HIBPA:6:3:4+78"),
+            "BPD is stored in wire format: {json}"
+        );
         let restored = SessionState::from_json(&json).unwrap();
 
         let p = restored.to_params();
@@ -245,7 +281,10 @@ mod tests {
         assert_eq!(p.tan_methods.len(), 1);
         assert_eq!(p.selected_security_function, SecurityFunction::new("942"));
         assert_eq!(p.accounts_from_upd.len(), 1);
-        assert_eq!(p.operation_tan_required.get(&SegmentType::new("HKKAZ")), Some(&false));
+        assert_eq!(
+            p.operation_tan_required.get(&SegmentType::new("HKKAZ")),
+            Some(&false)
+        );
         assert_eq!(restored.system_id.as_str(), "SYS;001");
     }
 
@@ -261,19 +300,35 @@ mod tests {
     fn changed_user_id_is_carried_over() {
         let mut p = params();
         p.changed_user_id = Some(UserId::new("new-user"));
-        let state = SessionState::capture(&Blz::new("1"), &UserId::new("old-user"), &SystemId::new("S"), &p);
+        let state = SessionState::capture(
+            &Blz::new("1"),
+            &UserId::new("old-user"),
+            &SystemId::new("S"),
+            &p,
+        );
         assert_eq!(state.user_id.as_str(), "new-user");
-        assert_eq!(state.previous_user_id.as_ref().map(|u| u.as_str()), Some("old-user"));
+        assert_eq!(
+            state.previous_user_id.as_ref().map(|u| u.as_str()),
+            Some("old-user")
+        );
     }
 
     #[test]
     fn reset_keeps_tan_preferences_only() {
-        let mut state = SessionState::capture(&Blz::new("1"), &UserId::new("u"), &SystemId::new("S"), &params())
-            .with_tan_medium(&TanMediumName::new("iPhone"));
+        let mut state = SessionState::capture(
+            &Blz::new("1"),
+            &UserId::new("u"),
+            &SystemId::new("S"),
+            &params(),
+        )
+        .with_tan_medium(&TanMediumName::new("iPhone"));
         state.reset();
         assert!(!state.system_id.is_assigned());
         assert!(!state.can_skip_sync());
-        assert_eq!(state.tan_medium.as_ref().map(|m| m.as_str()), Some("iPhone"));
+        assert_eq!(
+            state.tan_medium.as_ref().map(|m| m.as_str()),
+            Some("iPhone")
+        );
         assert_eq!(state.tan_method, Some(SecurityFunction::new("942")));
     }
 

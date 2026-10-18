@@ -218,7 +218,10 @@ fn parse_segment(data: &[u8], start: usize) -> Result<(RawSegment, usize)> {
                 })?;
                 pos += 1; // skip closing @
 
-                if pos.checked_add(bin_len).map_or(true, |end| end > data.len()) {
+                if pos
+                    .checked_add(bin_len)
+                    .map_or(true, |end| end > data.len())
+                {
                     return Err(FinTSError::Parse(format!(
                         "Binary data extends past end of message: need {} bytes at pos {}, only {} available",
                         bin_len, pos, data.len() - pos

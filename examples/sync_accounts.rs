@@ -30,12 +30,16 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let state_file = args.next().unwrap_or_else(|| "fints-state.json".into());
     let days: u32 = args.next().and_then(|d| d.parse().ok()).unwrap_or(90);
 
-    let saved = std::fs::read_to_string(&state_file).ok().map(|s| SessionState::from_json(&s)).transpose()?;
+    let saved = std::fs::read_to_string(&state_file)
+        .ok()
+        .map(|s| SessionState::from_json(&s))
+        .transpose()?;
     if saved.as_ref().is_some_and(|s| s.can_skip_sync()) {
         println!("Using cached session state from {state_file}");
     }
 
-    let (mut flow, info) = Flow::initiate(&blz, &user, &pin, &product, saved.as_ref(), None, None).await?;
+    let (mut flow, info) =
+        Flow::initiate(&blz, &user, &pin, &product, saved.as_ref(), None, None).await?;
 
     if flow.needs_tan() {
         let cancel = CancellationToken::new();
@@ -45,9 +49,14 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                 on_ctrl_c.cancel();
             }
         });
-        let opts = DecoupledOptions { timeout: Duration::from_secs(300), ..Default::default() };
+        let opts = DecoupledOptions {
+            timeout: Duration::from_secs(300),
+            ..Default::default()
+        };
         flow.await_decoupled(cancel, &opts, |event| match event {
-            DecoupledEvent::AwaitingConfirmation { challenge } => println!("Confirm in your banking app: {challenge}"),
+            DecoupledEvent::AwaitingConfirmation { challenge } => {
+                println!("Confirm in your banking app: {challenge}")
+            }
             DecoupledEvent::StillPending { poll } => println!("  still pending (poll {poll})"),
             DecoupledEvent::Confirmed { .. } => println!("  confirmed"),
             DecoupledEvent::Waiting { .. } => {}
@@ -57,9 +66,15 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         println!("No TAN needed (SCA exemption)");
     }
 
-    let bank_bic = fints::bank_by_blz(&blz).map(|b| b.bic.as_str().to_string()).unwrap_or_default();
+    let bank_bic = fints::bank_by_blz(&blz)
+        .map(|b| b.bic.as_str().to_string())
+        .unwrap_or_default();
     for acc in flow.accounts().to_vec() {
-        let label = if acc.iban.as_str().is_empty() { &acc.account_number } else { acc.iban.as_str() };
+        let label = if acc.iban.as_str().is_empty() {
+            &acc.account_number
+        } else {
+            acc.iban.as_str()
+        };
         let account = match Account::from_sepa(&acc, &bank_bic) {
             Ok(a) => a,
             Err(e) => {
@@ -81,7 +96,10 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     let state = flow.finish().await?;
     if let Some(old) = &state.previous_user_id {
-        println!("Bank changed the user ID from {old} to {} — update your credentials", state.user_id);
+        println!(
+            "Bank changed the user ID from {old} to {} — update your credentials",
+            state.user_id
+        );
     }
     std::fs::write(&state_file, state.to_json()?)?;
     println!("Session state saved to {state_file}");

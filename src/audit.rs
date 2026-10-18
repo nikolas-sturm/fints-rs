@@ -246,7 +246,9 @@ fn check_hnhbk_rules(segments: &[RawSegment], ctx: &mut AuditContext) {
             Some("HNHBK"),
         );
     }
-    let Some(hnhbk) = segments.first() else { return };
+    let Some(hnhbk) = segments.first() else {
+        return;
+    };
     if hnhbk.segment_type() != "HNHBK" {
         ctx.add(
             ViolationSeverity::Error,

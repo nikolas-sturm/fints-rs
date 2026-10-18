@@ -298,8 +298,14 @@ mod tests {
         assert_eq!(redacted.len(), message.len());
         assert!(!text.contains("heim") && !text.contains("654321"), "{text}");
         assert!(text.contains("HNSHA:4:2+123++********:******'"), "{text}");
-        assert!(text.contains("HKIDN:3:2+280:12345678+user+SYS+1'"), "other segments untouched");
-        assert!(decode_message(message.as_bytes()).is_ok(), "still parses after masking");
+        assert!(
+            text.contains("HKIDN:3:2+280:12345678+user+SYS+1'"),
+            "other segments untouched"
+        );
+        assert!(
+            decode_message(message.as_bytes()).is_ok(),
+            "still parses after masking"
+        );
     }
 
     #[test]

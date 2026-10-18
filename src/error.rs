@@ -81,7 +81,8 @@ impl FinTSError {
             Self::PinWrong | Self::AccountLocked | Self::Auth(_) => true,
             Self::BankError { kind, .. } => matches!(
                 kind,
-                crate::types::ResponseCodeKind::PinWrong(_) | crate::types::ResponseCodeKind::AccountLocked(_)
+                crate::types::ResponseCodeKind::PinWrong(_)
+                    | crate::types::ResponseCodeKind::AccountLocked(_)
             ),
             _ => false,
         }
@@ -92,7 +93,10 @@ impl FinTSError {
     pub fn needs_user(&self) -> bool {
         matches!(
             self,
-            Self::TanRequired | Self::TanRejected(_) | Self::TanTimeout | Self::DecoupledMaxPolls(_)
+            Self::TanRequired
+                | Self::TanRejected(_)
+                | Self::TanTimeout
+                | Self::DecoupledMaxPolls(_)
         )
     }
 
@@ -121,7 +125,10 @@ mod tests {
     fn classification() {
         assert!(FinTSError::PinWrong.is_credentials_error());
         assert!(FinTSError::AccountLocked.is_credentials_error());
-        let locked = FinTSError::BankError { kind: ResponseCodeKind::AccountLocked("9931".into()), message: "gesperrt".into() };
+        let locked = FinTSError::BankError {
+            kind: ResponseCodeKind::AccountLocked("9931".into()),
+            message: "gesperrt".into(),
+        };
         assert!(locked.is_credentials_error() && !locked.is_retryable());
 
         assert!(FinTSError::TanRequired.needs_user());
@@ -129,8 +136,16 @@ mod tests {
         assert!(!FinTSError::PinWrong.needs_user());
 
         assert!(FinTSError::Transport("reset".into()).is_retryable());
-        assert!(FinTSError::Http { status: 503, message: "maintenance".into() }.is_retryable());
-        assert!(!FinTSError::Http { status: 404, message: "gone".into() }.is_retryable());
+        assert!(FinTSError::Http {
+            status: 503,
+            message: "maintenance".into()
+        }
+        .is_retryable());
+        assert!(!FinTSError::Http {
+            status: 404,
+            message: "gone".into()
+        }
+        .is_retryable());
         assert!(!FinTSError::PinWrong.is_retryable());
     }
 }

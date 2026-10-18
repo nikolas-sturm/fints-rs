@@ -74,15 +74,36 @@ pub struct FetchOpts {
 impl FetchOpts {
     /// Fetch everything: balance, transactions, and holdings.
     pub fn all(days: u32) -> Self {
-        Self { balance: true, transactions: true, holdings: true, days, from: None, to: None }
+        Self {
+            balance: true,
+            transactions: true,
+            holdings: true,
+            days,
+            from: None,
+            to: None,
+        }
     }
     /// Fetch only balance (single request, fast).
     pub fn balance_only() -> Self {
-        Self { balance: true, transactions: false, holdings: false, days: 0, from: None, to: None }
+        Self {
+            balance: true,
+            transactions: false,
+            holdings: false,
+            days: 0,
+            from: None,
+            to: None,
+        }
     }
     /// Skip holdings (for accounts without a depot).
     pub fn no_holdings(days: u32) -> Self {
-        Self { balance: true, transactions: true, holdings: false, days, from: None, to: None }
+        Self {
+            balance: true,
+            transactions: true,
+            holdings: false,
+            days,
+            from: None,
+            to: None,
+        }
     }
     /// Fetch transactions for `from..=to` (`to` defaults to today) instead
     /// of the last `days` days.
@@ -188,14 +209,22 @@ pub async fn initiate_default<B: BankOps + ?Sized>(
     let session = session.filter(|s| {
         let matches = s.blz == config.blz && &s.user_id == username;
         if !matches {
-            warn!("[FinTS] Ignoring session state for {}/{} (dialog is {}/{})", s.blz, s.user_id, config.blz, username);
+            warn!(
+                "[FinTS] Ignoring session state for {}/{} (dialog is {}/{})",
+                s.blz, s.user_id, config.blz, username
+            );
         }
         matches
     });
 
     match initiate_once(bank, username, pin, product_id, session).await {
-        Err(FinTSError::SystemIdInvalid(msg)) if session.is_some_and(|s| s.system_id.is_assigned()) => {
-            warn!("[FinTS] Bank rejected cached system ID ({}); re-synchronizing", msg);
+        Err(FinTSError::SystemIdInvalid(msg))
+            if session.is_some_and(|s| s.system_id.is_assigned()) =>
+        {
+            warn!(
+                "[FinTS] Bank rejected cached system ID ({}); re-synchronizing",
+                msg
+            );
             initiate_once(bank, username, pin, product_id, None).await
         }
         other => other,
@@ -211,8 +240,10 @@ async fn initiate_once<B: BankOps + ?Sized>(
 ) -> Result<InitiateOutcome> {
     let (mut params, sys_id) = match session {
         Some(s) if s.can_skip_sync() => {
-            info!("[FinTS] Using cached BPD v{} / UPD v{} and system ID — skipping sync dialog",
-                s.bpd_version, s.upd_version);
+            info!(
+                "[FinTS] Using cached BPD v{} / UPD v{} and system ID — skipping sync dialog",
+                s.bpd_version, s.upd_version
+            );
             (s.to_params(), s.system_id.clone())
         }
         _ => {
@@ -225,7 +256,9 @@ async fn initiate_once<B: BankOps + ?Sized>(
             let sys_id = if sys_id.is_assigned() {
                 sys_id
             } else {
-                session.map(|s| s.system_id.clone()).unwrap_or_else(SystemId::unassigned)
+                session
+                    .map(|s| s.system_id.clone())
+                    .unwrap_or_else(SystemId::unassigned)
             };
             (params, sys_id)
         }
@@ -243,7 +276,8 @@ async fn initiate_once<B: BankOps + ?Sized>(
     let tan_methods = params.tan_methods.clone();
     let allowed = params.allowed_security_functions.clone();
 
-    let dialog = bank.new_dialog(username, pin, product_id)?
+    let dialog = bank
+        .new_dialog(username, pin, product_id)?
         .with_system_id(&sys_id)
         .with_params(&params);
 
@@ -253,8 +287,12 @@ async fn initiate_once<B: BankOps + ?Sized>(
                 decoupled: challenge.decoupled || tan_pending.bank_params().is_decoupled(),
                 ..challenge
             };
-            info!("[{}] TAN required: decoupled={}, task_ref='{}'",
-                bank.config().name, challenge.decoupled, challenge.task_reference);
+            info!(
+                "[{}] TAN required: decoupled={}, task_ref='{}'",
+                bank.config().name,
+                challenge.decoupled,
+                challenge.task_reference
+            );
             Ok(InitiateOutcome::NeedTan(InitiateResult {
                 params: tan_pending.bank_params().clone(),
                 system_id: tan_pending.system_id().clone(),
@@ -266,7 +304,10 @@ async fn initiate_once<B: BankOps + ?Sized>(
             }))
         }
         InitResult::Opened(open, _resp) => {
-            info!("[{}] Dialog opened without TAN (SCA exemption)", bank.config().name);
+            info!(
+                "[{}] Dialog opened without TAN (SCA exemption)",
+                bank.config().name
+            );
             Ok(InitiateOutcome::Authenticated(InitiateNoTanResult {
                 params: open.bank_params().clone(),
                 system_id: open.system_id().clone(),
@@ -286,7 +327,12 @@ pub async fn fetch_default(
     account: &Account,
     days: u32,
 ) -> Result<FetchResult> {
-    info!("[{}] Fetching IBAN={}, BIC={}", tag, account.iban(), account.bic());
+    info!(
+        "[{}] Fetching IBAN={}, BIC={}",
+        tag,
+        account.iban(),
+        account.bic()
+    );
 
     // ── Balance (HKSAL) ──
     let balance = match dialog.balance(account).await {
@@ -319,7 +365,11 @@ pub async fn fetch_default(
         }
     };
 
-    Ok(FetchResult { balance, transactions, holdings })
+    Ok(FetchResult {
+        balance,
+        transactions,
+        holdings,
+    })
 }
 
 /// Fetch and parse all transaction pages (HKKAZ with touchdown pagination)
@@ -351,16 +401,26 @@ pub async fn fetch_transactions_range(
     let mut pages = 0u32;
 
     loop {
-        match dialog.transactions(account, start_date, end_date, touchdown.as_ref()).await? {
+        match dialog
+            .transactions(account, start_date, end_date, touchdown.as_ref())
+            .await?
+        {
             TransactionResult::NeedTan(_) => {
                 // Typically more than 90 days of history without a fresh SCA.
-                warn!("[{}] The bank requires an additional TAN for transactions", tag);
+                warn!(
+                    "[{}] The bank requires an additional TAN for transactions",
+                    tag
+                );
                 return Err(FinTSError::TanRequired);
             }
             TransactionResult::Success(page) => {
                 pages += 1;
-                if !page.booked.is_empty() { all_booked.extend(page.booked.0); }
-                if !page.pending.is_empty() { all_pending.extend(page.pending.0); }
+                if !page.booked.is_empty() {
+                    all_booked.extend(page.booked.0);
+                }
+                if !page.pending.is_empty() {
+                    all_pending.extend(page.pending.0);
+                }
                 match page.touchdown {
                     // A bank repeating the same touchdown point would loop forever.
                     Some(td) if Some(&td) == touchdown.as_ref() => {
@@ -379,9 +439,17 @@ pub async fn fetch_transactions_range(
 
     let mut transactions = parse_mt940(all_booked.as_bytes(), TransactionStatus::Booked)?;
     if !all_pending.is_empty() {
-        transactions.extend(parse_mt940(all_pending.as_bytes(), TransactionStatus::Pending)?);
+        transactions.extend(parse_mt940(
+            all_pending.as_bytes(),
+            TransactionStatus::Pending,
+        )?);
     }
-    info!("[{}] {} transactions in {} page(s)", tag, transactions.len(), pages);
+    info!(
+        "[{}] {} transactions in {} page(s)",
+        tag,
+        transactions.len(),
+        pages
+    );
     Ok(transactions)
 }
 
@@ -392,7 +460,11 @@ pub async fn fetch_holdings_default(
     dialog: &mut Dialog<Open>,
     account: &Account,
 ) -> Result<Vec<SecurityHolding>> {
-    info!("[{}] Fetching holdings for {}", tag, account.account_number().unwrap_or(account.iban()));
+    info!(
+        "[{}] Fetching holdings for {}",
+        tag,
+        account.account_number().unwrap_or(account.iban())
+    );
 
     let mut all_holdings = Vec::new();
     let mut touchdown: Option<TouchdownPoint> = None;
@@ -475,11 +547,15 @@ impl Dkb {
 }
 
 impl Default for Dkb {
-    fn default() -> Self { Self::new() }
+    fn default() -> Self {
+        Self::new()
+    }
 }
 
 impl BankOps for Dkb {
-    fn config(&self) -> &BankConfig { &self.bank }
+    fn config(&self) -> &BankConfig {
+        &self.bank
+    }
 
     async fn initiate(
         &self,
@@ -493,11 +569,20 @@ impl BankOps for Dkb {
         initiate_default(self, username, pin, product_id, session).await
     }
 
-    async fn fetch(&self, dialog: &mut Dialog<Open>, account: &Account, days: u32) -> Result<FetchResult> {
+    async fn fetch(
+        &self,
+        dialog: &mut Dialog<Open>,
+        account: &Account,
+        days: u32,
+    ) -> Result<FetchResult> {
         fetch_default("DKB", dialog, account, days).await
     }
 
-    async fn fetch_holdings(&self, dialog: &mut Dialog<Open>, account: &Account) -> Result<Vec<SecurityHolding>> {
+    async fn fetch_holdings(
+        &self,
+        dialog: &mut Dialog<Open>,
+        account: &Account,
+    ) -> Result<Vec<SecurityHolding>> {
         fetch_holdings_default("DKB", dialog, account).await
     }
 }
@@ -540,18 +625,27 @@ impl Ing {
         Self {
             bank: crate::banks::bank_by_blz(Self::BLZ).unwrap_or_else(|| {
                 // Same values as hbci4java's blz.properties.
-                BankConfig::new("ING-DiBa", Self::BLZ, "INGDDEFFXXX", "https://fints.ing.de/fints/")
+                BankConfig::new(
+                    "ING-DiBa",
+                    Self::BLZ,
+                    "INGDDEFFXXX",
+                    "https://fints.ing.de/fints/",
+                )
             }),
         }
     }
 }
 
 impl Default for Ing {
-    fn default() -> Self { Self::new() }
+    fn default() -> Self {
+        Self::new()
+    }
 }
 
 impl BankOps for Ing {
-    fn config(&self) -> &BankConfig { &self.bank }
+    fn config(&self) -> &BankConfig {
+        &self.bank
+    }
 
     async fn initiate(
         &self,
@@ -565,11 +659,20 @@ impl BankOps for Ing {
         initiate_default(self, username, pin, product_id, session).await
     }
 
-    async fn fetch(&self, dialog: &mut Dialog<Open>, account: &Account, days: u32) -> Result<FetchResult> {
+    async fn fetch(
+        &self,
+        dialog: &mut Dialog<Open>,
+        account: &Account,
+        days: u32,
+    ) -> Result<FetchResult> {
         fetch_default("ING", dialog, account, days).await
     }
 
-    async fn fetch_holdings(&self, dialog: &mut Dialog<Open>, account: &Account) -> Result<Vec<SecurityHolding>> {
+    async fn fetch_holdings(
+        &self,
+        dialog: &mut Dialog<Open>,
+        account: &Account,
+    ) -> Result<Vec<SecurityHolding>> {
         fetch_holdings_default("ING", dialog, account).await
     }
 }
@@ -591,7 +694,9 @@ impl GenericBank {
 }
 
 impl BankOps for GenericBank {
-    fn config(&self) -> &BankConfig { &self.bank }
+    fn config(&self) -> &BankConfig {
+        &self.bank
+    }
 
     async fn initiate(
         &self,
@@ -605,11 +710,20 @@ impl BankOps for GenericBank {
         initiate_default(self, username, pin, product_id, session).await
     }
 
-    async fn fetch(&self, dialog: &mut Dialog<Open>, account: &Account, days: u32) -> Result<FetchResult> {
+    async fn fetch(
+        &self,
+        dialog: &mut Dialog<Open>,
+        account: &Account,
+        days: u32,
+    ) -> Result<FetchResult> {
         fetch_default(self.bank.name.as_str(), dialog, account, days).await
     }
 
-    async fn fetch_holdings(&self, dialog: &mut Dialog<Open>, account: &Account) -> Result<Vec<SecurityHolding>> {
+    async fn fetch_holdings(
+        &self,
+        dialog: &mut Dialog<Open>,
+        account: &Account,
+    ) -> Result<Vec<SecurityHolding>> {
         fetch_holdings_default(self.bank.name.as_str(), dialog, account).await
     }
 }
@@ -685,9 +799,15 @@ impl AnyBank {
         let balance = if opts.balance {
             match dialog.balance(account).await {
                 Ok(BalanceResult::Success(b)) => Some(b),
-                Ok(BalanceResult::NeedTan(_)) => { warn!("[{}] Balance requires TAN — skipping", tag); None }
+                Ok(BalanceResult::NeedTan(_)) => {
+                    warn!("[{}] Balance requires TAN — skipping", tag);
+                    None
+                }
                 Ok(BalanceResult::Empty) => None,
-                Err(e) => { warn!("[{}] Balance failed: {}", tag, e); None }
+                Err(e) => {
+                    warn!("[{}] Balance failed: {}", tag, e);
+                    None
+                }
             }
         } else {
             None
@@ -703,13 +823,20 @@ impl AnyBank {
         let holdings = if opts.holdings {
             match self.fetch_holdings(dialog, account).await {
                 Ok(h) => h,
-                Err(e) => { warn!("[{}] Holdings fetch failed: {}", tag, e); Vec::new() }
+                Err(e) => {
+                    warn!("[{}] Holdings fetch failed: {}", tag, e);
+                    Vec::new()
+                }
             }
         } else {
             Vec::new()
         };
 
-        Ok(FetchResult { balance, transactions, holdings })
+        Ok(FetchResult {
+            balance,
+            transactions,
+            holdings,
+        })
     }
 }
 
@@ -737,15 +864,25 @@ pub fn bank_ops_with_config(config: BankConfig) -> AnyBank {
 // ═══════════════════════════════════════════════════════════════════════════════
 
 fn parse_mt940(data: &[u8], status: TransactionStatus) -> Result<Vec<Transaction>> {
-    if data.is_empty() { return Ok(Vec::new()); }
+    if data.is_empty() {
+        return Ok(Vec::new());
+    }
 
     let (cow, _, had_errors) = encoding_rs::WINDOWS_1252.decode(data);
-    if had_errors { warn!("MT940 encoding errors"); }
+    if had_errors {
+        warn!("MT940 encoding errors");
+    }
     let mt940_text = cow.into_owned();
 
-    let cleaned: String = mt940_text.lines()
-        .filter(|l| { let t = l.trim(); !t.is_empty() && t != "-" && t != "--" })
-        .collect::<Vec<_>>().join("\r\n") + "\r\n";
+    let cleaned: String = mt940_text
+        .lines()
+        .filter(|l| {
+            let t = l.trim();
+            !t.is_empty() && t != "-" && t != "--"
+        })
+        .collect::<Vec<_>>()
+        .join("\r\n")
+        + "\r\n";
 
     let sanitized = mt940::sanitizers::to_swift_charset(&cleaned);
     let messages = mt940::parse_mt940(&sanitized)
@@ -754,7 +891,10 @@ fn parse_mt940(data: &[u8], status: TransactionStatus) -> Result<Vec<Transaction
     let mut transactions = Vec::new();
     for msg in messages {
         for line in msg.statement_lines {
-            let is_debit = matches!(line.ext_debit_credit_indicator, mt940::ExtDebitOrCredit::Debit);
+            let is_debit = matches!(
+                line.ext_debit_credit_indicator,
+                mt940::ExtDebitOrCredit::Debit
+            );
             let amount = if is_debit { -line.amount } else { line.amount };
             let booking_date = booking_date(line.value_date, line.entry_date);
             let details = Details::from(line.information_to_account_owner.as_ref());
@@ -791,7 +931,8 @@ fn parse_mt940(data: &[u8], status: TransactionStatus) -> Result<Vec<Transaction
                 bank_reference: line.bank_ref.clone(),
                 gvc: details.gvc,
                 prima_nota: details.prima_nota,
-                raw, status: status.clone(),
+                raw,
+                status: status.clone(),
             });
         }
     }
@@ -806,7 +947,9 @@ fn parse_mt940(data: &[u8], status: TransactionStatus) -> Result<Vec<Transaction
 /// (value 2025-12-31, entry 0102 must be 2026-01-02), so shift by a year
 /// when the two are more than half a year apart.
 fn booking_date(value_date: NaiveDate, entry_date: Option<NaiveDate>) -> NaiveDate {
-    let Some(entry) = entry_date else { return value_date };
+    let Some(entry) = entry_date else {
+        return value_date;
+    };
     let gap = (entry - value_date).num_days();
     let year = if gap > 183 {
         entry.year() - 1
@@ -834,8 +977,15 @@ impl From<Option<&mt940::InformationToAccountOwner>> for Details {
     fn from(info: Option<&mt940::InformationToAccountOwner>) -> Self {
         match info {
             Some(mt940::InformationToAccountOwner::Structured {
-                transaction_code, posting_text, prima_nota, purpose, additional_purpose,
-                applicant_bin, applicant_iban, applicant_name, ..
+                transaction_code,
+                posting_text,
+                prima_nota,
+                purpose,
+                additional_purpose,
+                applicant_bin,
+                applicant_iban,
+                applicant_name,
+                ..
             }) => Details {
                 gvc: non_empty(Some(transaction_code.as_str())),
                 posting_text: non_empty(posting_text.as_deref()),
@@ -861,7 +1011,9 @@ impl From<Option<&mt940::InformationToAccountOwner>> for Details {
 }
 
 fn non_empty(s: Option<&str>) -> Option<String> {
-    s.map(str::trim).filter(|s| !s.is_empty()).map(str::to_owned)
+    s.map(str::trim)
+        .filter(|s| !s.is_empty())
+        .map(str::to_owned)
 }
 
 #[cfg(test)]
@@ -873,7 +1025,12 @@ mod tests {
     }
 
     fn statement(lines: &[&str]) -> Vec<u8> {
-        let mut text = vec![":20:STARTUMS", ":25:12345678/0000001234", ":28C:0", ":60F:C251230EUR1000,00"];
+        let mut text = vec![
+            ":20:STARTUMS",
+            ":25:12345678/0000001234",
+            ":28C:0",
+            ":60F:C251230EUR1000,00",
+        ];
         text.extend_from_slice(lines);
         text.push(":62F:C260102EUR987,50");
         text.join("\r\n").into_bytes()
@@ -890,7 +1047,11 @@ mod tests {
         assert_eq!(txs.len(), 1);
         let tx = &txs[0];
         assert_eq!(tx.date, d(2025, 12, 30), "date is the booking (entry) date");
-        assert_eq!(tx.valuta_date, Some(d(2025, 12, 29)), "valuta_date is the value date");
+        assert_eq!(
+            tx.valuta_date,
+            Some(d(2025, 12, 29)),
+            "valuta_date is the value date"
+        );
         assert_eq!(tx.amount.to_string(), "-12.50");
         assert_eq!(tx.gvc.as_deref(), Some("105"));
         assert_eq!(tx.prima_nota.as_deref(), Some("931"));
@@ -898,8 +1059,14 @@ mod tests {
         assert_eq!(tx.bank_reference.as_deref(), Some("BANKREF-1"));
         assert_eq!(tx.reference.as_deref(), Some("NONREF"));
         assert_eq!(tx.applicant_name.as_deref(), Some("Versicherung AG"));
-        assert_eq!(tx.applicant_iban.as_ref().map(|i| i.as_str()), Some("DE89370400440532013000"));
-        assert_eq!(tx.applicant_bic.as_ref().map(|b| b.as_str()), Some("DEUTDEFFXXX"));
+        assert_eq!(
+            tx.applicant_iban.as_ref().map(|i| i.as_str()),
+            Some("DE89370400440532013000")
+        );
+        assert_eq!(
+            tx.applicant_bic.as_ref().map(|b| b.as_str()),
+            Some("DEUTDEFFXXX")
+        );
         // ?20-?29 and ?60 joined without separators, so the creditor id split
         // across ?20/?21 comes out whole.
         assert_eq!(
@@ -910,7 +1077,10 @@ mod tests {
 
     #[test]
     fn missing_entry_date_falls_back_to_value_date() {
-        let data = statement(&[":61:251230C100,00NMSCNONREF", ":86:166?00GUTSCHRIFT?20Miete"]);
+        let data = statement(&[
+            ":61:251230C100,00NMSCNONREF",
+            ":86:166?00GUTSCHRIFT?20Miete",
+        ]);
         let tx = &parse_mt940(&data, TransactionStatus::Booked).unwrap()[0];
         assert_eq!(tx.date, d(2025, 12, 30));
         assert_eq!(tx.valuta_date, Some(d(2025, 12, 30)));
@@ -921,11 +1091,20 @@ mod tests {
     #[test]
     fn entry_date_across_new_year() {
         // Value 2025-12-31, booked 01-02: the booking is in 2026.
-        assert_eq!(booking_date(d(2025, 12, 31), Some(d(2025, 1, 2))), d(2026, 1, 2));
+        assert_eq!(
+            booking_date(d(2025, 12, 31), Some(d(2025, 1, 2))),
+            d(2026, 1, 2)
+        );
         // Value 2026-01-02, booked 12-31: the booking was in 2025.
-        assert_eq!(booking_date(d(2026, 1, 2), Some(d(2026, 12, 31))), d(2025, 12, 31));
+        assert_eq!(
+            booking_date(d(2026, 1, 2), Some(d(2026, 12, 31))),
+            d(2025, 12, 31)
+        );
         // Same year: unchanged.
-        assert_eq!(booking_date(d(2026, 3, 1), Some(d(2026, 2, 27))), d(2026, 2, 27));
+        assert_eq!(
+            booking_date(d(2026, 3, 1), Some(d(2026, 2, 27))),
+            d(2026, 2, 27)
+        );
         assert_eq!(booking_date(d(2026, 3, 1), None), d(2026, 3, 1));
     }
 

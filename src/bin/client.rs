@@ -33,12 +33,11 @@ use fints::{
     flow::{Flow, SyncResult},
     protocol::Dialog,
     types::{
-        AccountBalance, Blz, Pin, ProductId, SepaAccount, SecurityHolding,
-        TanMethod, Transaction, UserId,
+        AccountBalance, Blz, Pin, ProductId, SecurityHolding, SepaAccount, TanMethod, Transaction,
+        UserId,
     },
     workflow::FetchOpts,
-    BankConfig, CancellationToken, DecoupledEvent, DecoupledOptions,
-    SessionState,
+    BankConfig, CancellationToken, DecoupledEvent, DecoupledOptions, SessionState,
 };
 
 // ═══════════════════════════════════════════════════════════════════════════════
@@ -386,19 +385,28 @@ fn validate_iban(iban: &str) -> Result<String, String> {
 
     // Step 2a: Check length (15-34 chars)
     if iban.len() < 15 || iban.len() > 34 {
-        return Err(format!("Invalid length {} (must be 15–34 characters)", iban.len()));
+        return Err(format!(
+            "Invalid length {} (must be 15–34 characters)",
+            iban.len()
+        ));
     }
 
     // Step 2b: Check country code (first 2 chars must be alpha)
     let country_code = &iban[..2];
     if !country_code.chars().all(|c| c.is_ascii_alphabetic()) {
-        return Err(format!("Invalid country code '{}' (must be 2 letters)", country_code));
+        return Err(format!(
+            "Invalid country code '{}' (must be 2 letters)",
+            country_code
+        ));
     }
 
     // Step 2c: Check that positions 2–3 are digits (check digits)
     let check_digits = &iban[2..4];
     if !check_digits.chars().all(|c| c.is_ascii_digit()) {
-        return Err(format!("Invalid check digits '{}' (must be 2 digits)", check_digits));
+        return Err(format!(
+            "Invalid check digits '{}' (must be 2 digits)",
+            check_digits
+        ));
     }
 
     // Step 4: Validate German IBAN length
@@ -487,11 +495,7 @@ fn load_session(session_dir: &Path, name: &str) -> Result<SessionFile, String> {
     serde_json::from_str(&data).map_err(|e| format!("Failed to parse session file: {}", e))
 }
 
-fn save_session(
-    session_dir: &Path,
-    name: &str,
-    session: &SessionFile,
-) -> Result<(), String> {
+fn save_session(session_dir: &Path, name: &str, session: &SessionFile) -> Result<(), String> {
     std::fs::create_dir_all(session_dir)
         .map_err(|e| format!("Failed to create session directory: {}", e))?;
     let path = session_path(session_dir, name);
@@ -503,8 +507,7 @@ fn save_session(
 
 fn delete_session(session_dir: &Path, name: &str) -> Result<(), String> {
     let path = session_path(session_dir, name);
-    std::fs::remove_file(&path)
-        .map_err(|e| format!("Failed to delete session '{}': {}", name, e))
+    std::fs::remove_file(&path).map_err(|e| format!("Failed to delete session '{}': {}", name, e))
 }
 
 fn list_sessions(session_dir: &Path) -> Vec<(String, SessionFile)> {
@@ -537,8 +540,7 @@ fn encode_resume_token(session: &SessionFile) -> Result<String, String> {
     use flate2::write::ZlibEncoder;
     use flate2::Compression;
 
-    let json =
-        serde_json::to_vec(session).map_err(|e| format!("Serialization error: {}", e))?;
+    let json = serde_json::to_vec(session).map_err(|e| format!("Serialization error: {}", e))?;
 
     let mut encoder = ZlibEncoder::new(Vec::new(), Compression::default());
     encoder
@@ -612,9 +614,7 @@ fn prompt_input(prompt_text: &str) -> Result<String, String> {
 /// Format a Decimal with 2 decimal places and thousands separator (e.g. 1,234.56).
 fn format_amount(amount: &Decimal) -> String {
     let formatted = format!("{:.2}", amount);
-    let (integer_part, decimal_part) = formatted
-        .split_once('.')
-        .unwrap_or((&formatted, "00"));
+    let (integer_part, decimal_part) = formatted.split_once('.').unwrap_or((&formatted, "00"));
 
     let is_negative = integer_part.starts_with('-');
     let digits = if is_negative {
@@ -672,18 +672,26 @@ impl ResolvedBank {
 fn resolve_bank(cli: &Cli) -> Result<ResolvedBank, String> {
     // Explicit custom URL takes priority
     if let Some(url) = &cli.url {
-        let blz = cli.blz.clone()
+        let blz = cli
+            .blz
+            .clone()
             .or_else(|| cli.bank.clone())
             .unwrap_or_default();
         let name = bank_by_blz(&blz)
             .map(|b| b.name.as_str().to_string())
             .unwrap_or_else(|| "Custom".to_string());
         let config = BankConfig::new(
-            name.clone(), blz.clone(),
+            name.clone(),
+            blz.clone(),
             "", // BIC not required for custom banks
             url.clone(),
         );
-        return Ok(ResolvedBank { blz, name, url: url.clone(), config });
+        return Ok(ResolvedBank {
+            blz,
+            name,
+            url: url.clone(),
+            config,
+        });
     }
 
     // --bank accepts a BLZ
@@ -836,7 +844,11 @@ fn print_balance_human(iban: &str, balance: &AccountBalance, account_name: Optio
         println!("Available: {} {}", format_amount(avail), balance.currency);
     }
     if let Some(credit) = &balance.credit_line {
-        println!("Credit line: {} {}", format_amount(credit), balance.currency);
+        println!(
+            "Credit line: {} {}",
+            format_amount(credit),
+            balance.currency
+        );
     }
 }
 
@@ -865,7 +877,8 @@ fn print_holdings_human(holdings: &[SecurityHolding]) {
         return;
     }
     // Compute total portfolio value for summary
-    let total_eur: Option<rust_decimal::Decimal> = holdings.iter()
+    let total_eur: Option<rust_decimal::Decimal> = holdings
+        .iter()
         .filter_map(|h| {
             h.market_value.as_ref().and_then(|v| {
                 // Only sum EUR-denominated for simplicity
@@ -902,12 +915,19 @@ fn print_holdings_human(holdings: &[SecurityHolding]) {
             Some(pl) => format!("  {}", format_amount(pl)),
             None => String::new(),
         };
-        let date_str = h.price_date.map(|d| format!(" ({})", d)).unwrap_or_default();
+        let date_str = h
+            .price_date
+            .map(|d| format!(" ({})", d))
+            .unwrap_or_default();
         let name = &h.name[..h.name.len().min(32)];
         println!(
             "  {:<32}  {:<14}  {:>8}  {:>16}  {:>16}{}",
             name,
-            if wkn_str.is_empty() { isin_str.to_string() } else { format!("{} / {}", isin_str, wkn_str) },
+            if wkn_str.is_empty() {
+                isin_str.to_string()
+            } else {
+                format!("{} / {}", isin_str, wkn_str)
+            },
             format_amount(&h.quantity),
             format!("{}{}", price_str, date_str),
             value_str,
@@ -916,32 +936,67 @@ fn print_holdings_human(holdings: &[SecurityHolding]) {
     }
     if let Some(total) = total_eur {
         println!("  {}", "─".repeat(90));
-        println!("  {:<32}  {:<14}  {:>8}  {:>16}  {:>16}",
-            "Total (EUR positions)", "", "", "", format!("{} EUR", format_amount(&total)));
+        println!(
+            "  {:<32}  {:<14}  {:>8}  {:>16}  {:>16}",
+            "Total (EUR positions)",
+            "",
+            "",
+            "",
+            format!("{} EUR", format_amount(&total))
+        );
     }
 }
 
 /// Print holdings as a JSON array
 fn print_holdings_json(holdings: &[SecurityHolding]) {
-    println!("{}", serde_json::to_string_pretty(holdings).unwrap_or_default());
+    println!(
+        "{}",
+        serde_json::to_string_pretty(holdings).unwrap_or_default()
+    );
 }
 
 /// Print holdings as CSV
 fn print_holdings_csv(holdings: &[SecurityHolding]) {
     let mut wtr = csv::Writer::from_writer(io::stdout());
-    let _ = wtr.write_record(["name", "isin", "wkn", "quantity", "price", "price_currency", "price_date", "market_value", "market_value_currency", "profit_loss"]);
+    let _ = wtr.write_record([
+        "name",
+        "isin",
+        "wkn",
+        "quantity",
+        "price",
+        "price_currency",
+        "price_date",
+        "market_value",
+        "market_value_currency",
+        "profit_loss",
+    ]);
     for h in holdings {
         let _ = wtr.write_record([
             h.name.as_str(),
             h.isin.as_ref().map(|i| i.as_str()).unwrap_or(""),
             h.wkn.as_ref().map(|w| w.as_str()).unwrap_or(""),
             &h.quantity.to_string(),
-            h.price.as_ref().map(|p| p.to_string()).as_deref().unwrap_or(""),
+            h.price
+                .as_ref()
+                .map(|p| p.to_string())
+                .as_deref()
+                .unwrap_or(""),
             h.price_currency.as_ref().map(|c| c.as_str()).unwrap_or(""),
             h.price_date.map(|d| d.to_string()).as_deref().unwrap_or(""),
-            h.market_value.as_ref().map(|v| v.to_string()).as_deref().unwrap_or(""),
-            h.market_value_currency.as_ref().map(|c| c.as_str()).unwrap_or(""),
-            h.profit_loss.as_ref().map(|p| p.to_string()).as_deref().unwrap_or(""),
+            h.market_value
+                .as_ref()
+                .map(|v| v.to_string())
+                .as_deref()
+                .unwrap_or(""),
+            h.market_value_currency
+                .as_ref()
+                .map(|c| c.as_str())
+                .unwrap_or(""),
+            h.profit_loss
+                .as_ref()
+                .map(|p| p.to_string())
+                .as_deref()
+                .unwrap_or(""),
         ]);
     }
     let _ = wtr.flush();
@@ -956,8 +1011,10 @@ fn print_sync_result_human(result: &SyncResult) {
         if let Some(ref avail) = bal.available {
             println!(
                 "Balance: {} {} (available: {} {}; as of {})",
-                format_amount(&bal.amount), bal.currency,
-                format_amount(avail), bal.currency,
+                format_amount(&bal.amount),
+                bal.currency,
+                format_amount(avail),
+                bal.currency,
                 bal.date
             );
         } else {
@@ -969,7 +1026,12 @@ fn print_sync_result_human(result: &SyncResult) {
             );
         }
         if let (Some(pending), Some(pdate)) = (&bal.pending_amount, bal.pending_date) {
-            println!("Pending: {} {} (as of {})", format_amount(pending), bal.currency, pdate);
+            println!(
+                "Pending: {} {} (as of {})",
+                format_amount(pending),
+                bal.currency,
+                pdate
+            );
         }
     }
     if result.transactions.is_empty() && result.holdings.is_empty() {
@@ -1034,10 +1096,7 @@ fn map_fints_error(e: &FinTSError) -> String {
 async fn cmd_banks() {
     let banks = all_banks();
     println!("Known banks ({} total):", banks.len());
-    println!(
-        "{:<12} {:<14} {:<40} {}",
-        "BLZ", "BIC", "Name", "URL"
-    );
+    println!("{:<12} {:<14} {:<40} {}", "BLZ", "BIC", "Name", "URL");
     println!("{}", "-".repeat(100));
     for bank in &banks {
         let name = bank.name.as_str();
@@ -1066,7 +1125,12 @@ async fn cmd_setup(cli: &Cli) -> Result<(), String> {
         Err(_) => {
             println!("Available banks:");
             for (i, bank) in all_banks().iter().enumerate() {
-                println!("  {}. {} (BLZ: {})", i + 1, bank.name.as_str(), bank.blz.as_str());
+                println!(
+                    "  {}. {} (BLZ: {})",
+                    i + 1,
+                    bank.name.as_str(),
+                    bank.blz.as_str()
+                );
             }
             let banks = all_banks();
             println!("  {}. Custom URL", banks.len() + 1);
@@ -1145,9 +1209,7 @@ async fn cmd_setup(cli: &Cli) -> Result<(), String> {
             "Note: {} TAN methods available.",
             challenge.tan_methods.len()
         );
-        println!(
-            "Use 'sync' or 'transactions' to fetch data (TAN will be requested then)."
-        );
+        println!("Use 'sync' or 'transactions' to fetch data (TAN will be requested then).");
     }
 
     // Build session
@@ -1160,7 +1222,11 @@ async fn cmd_setup(cli: &Cli) -> Result<(), String> {
         system_id: system_id.as_str().to_string(),
         bpd_version: state.bpd_version,
         upd_version: state.upd_version,
-        tan_methods: challenge.tan_methods.iter().map(TanMethodSer::from).collect(),
+        tan_methods: challenge
+            .tan_methods
+            .iter()
+            .map(TanMethodSer::from)
+            .collect(),
         selected_security_function: state
             .tan_method
             .as_ref()
@@ -1173,10 +1239,7 @@ async fn cmd_setup(cli: &Cli) -> Result<(), String> {
         state: Some(state),
     };
 
-    let session_name = cli
-        .session
-        .clone()
-        .unwrap_or_else(|| bank.blz.clone());
+    let session_name = cli.session.clone().unwrap_or_else(|| bank.blz.clone());
 
     if cli.no_persist {
         let token = encode_resume_token(&session)?;
@@ -1204,10 +1267,7 @@ async fn cmd_setup(cli: &Cli) -> Result<(), String> {
 
 async fn cmd_sync(cli: &Cli, sync_args: &SyncArgs) -> Result<(), String> {
     let bank = resolve_bank(cli)?;
-    let session_name = cli
-        .session
-        .clone()
-        .unwrap_or_else(|| bank.blz.clone());
+    let session_name = cli.session.clone().unwrap_or_else(|| bank.blz.clone());
     let session_dir = get_session_dir(cli.session_dir.as_ref());
 
     let existing_session = if let Some(token) = &cli.resume_token {
@@ -1261,11 +1321,21 @@ async fn cmd_sync(cli: &Cli, sync_args: &SyncArgs) -> Result<(), String> {
     // Determine which accounts to fetch
     let target_accounts: Vec<(String, String)> = if sync_args.all_accounts && !accounts.is_empty() {
         // All accounts from session
-        accounts.iter().map(|a| (a.iban.clone(), a.bic.clone())).collect()
+        accounts
+            .iter()
+            .map(|a| (a.iban.clone(), a.bic.clone()))
+            .collect()
     } else if let Some(ref explicit_iban) = sync_args.iban {
         let iban = validate_iban(explicit_iban).map_err(|e| format!("Invalid IBAN: {}", e))?;
-        let bic = sync_args.bic.clone()
-            .or_else(|| accounts.iter().find(|a| a.iban == iban).map(|a| a.bic.clone()))
+        let bic = sync_args
+            .bic
+            .clone()
+            .or_else(|| {
+                accounts
+                    .iter()
+                    .find(|a| a.iban == iban)
+                    .map(|a| a.bic.clone())
+            })
             .unwrap_or_default();
         vec![(iban, bic)]
     } else if let Some(acc) = accounts.first() {
@@ -1278,7 +1348,8 @@ async fn cmd_sync(cli: &Cli, sync_args: &SyncArgs) -> Result<(), String> {
     };
 
     // Fetch first account via confirm_and_fetch_opts (handles TAN polling)
-    let (first_iban, first_bic) = target_accounts.first()
+    let (first_iban, first_bic) = target_accounts
+        .first()
         .cloned()
         .ok_or("No account to sync")?;
 
@@ -1304,7 +1375,11 @@ async fn cmd_sync(cli: &Cli, sync_args: &SyncArgs) -> Result<(), String> {
         system_id: system_id_str,
         bpd_version: state.bpd_version,
         upd_version: state.upd_version,
-        tan_methods: challenge.tan_methods.iter().map(TanMethodSer::from).collect(),
+        tan_methods: challenge
+            .tan_methods
+            .iter()
+            .map(TanMethodSer::from)
+            .collect(),
         selected_security_function: existing_session
             .as_ref()
             .map(|s| s.selected_security_function.clone())
@@ -1343,10 +1418,7 @@ async fn cmd_sync(cli: &Cli, sync_args: &SyncArgs) -> Result<(), String> {
 
 async fn cmd_balance(cli: &Cli, balance_args: &BalanceArgs) -> Result<(), String> {
     let bank = resolve_bank(cli)?;
-    let session_name = cli
-        .session
-        .clone()
-        .unwrap_or_else(|| bank.blz.clone());
+    let session_name = cli.session.clone().unwrap_or_else(|| bank.blz.clone());
     let session_dir = get_session_dir(cli.session_dir.as_ref());
 
     let existing_session = load_session(&session_dir, &session_name).ok();
@@ -1381,16 +1453,22 @@ async fn cmd_balance(cli: &Cli, balance_args: &BalanceArgs) -> Result<(), String
 
     let (iban, bic) = if let Some(ref explicit_iban) = balance_args.iban {
         let iban = validate_iban(explicit_iban).map_err(|e| format!("Invalid IBAN: {}", e))?;
-        let bic = balance_args.bic.clone()
-            .or_else(|| accounts.iter().find(|a| a.iban == iban).map(|a| a.bic.clone()))
+        let bic = balance_args
+            .bic
+            .clone()
+            .or_else(|| {
+                accounts
+                    .iter()
+                    .find(|a| a.iban == iban)
+                    .map(|a| a.bic.clone())
+            })
             .unwrap_or_default();
         (iban, bic)
     } else if let Some(acc) = accounts.first() {
         (acc.iban.clone(), acc.bic.clone())
     } else {
         let iban = prompt_input("Account IBAN: ")?;
-        let iban =
-            validate_iban(&iban).map_err(|e| format!("Invalid IBAN: {}", e))?;
+        let iban = validate_iban(&iban).map_err(|e| format!("Invalid IBAN: {}", e))?;
         let bic = prompt_input("Account BIC: ")?;
         (iban, bic)
     };
@@ -1419,10 +1497,7 @@ async fn cmd_balance(cli: &Cli, balance_args: &BalanceArgs) -> Result<(), String
             }
             OutputFormat::Csv => {
                 println!("date,amount,currency");
-                println!(
-                    "{},{},{}",
-                    balance.date, balance.amount, balance.currency
-                );
+                println!("{},{},{}", balance.date, balance.amount, balance.currency);
             }
         }
     } else {
@@ -1438,10 +1513,7 @@ async fn cmd_balance(cli: &Cli, balance_args: &BalanceArgs) -> Result<(), String
 
 async fn cmd_transactions(cli: &Cli, args: &TransactionsArgs) -> Result<(), String> {
     let bank = resolve_bank(cli)?;
-    let session_name = cli
-        .session
-        .clone()
-        .unwrap_or_else(|| bank.blz.clone());
+    let session_name = cli.session.clone().unwrap_or_else(|| bank.blz.clone());
     let session_dir = get_session_dir(cli.session_dir.as_ref());
 
     let existing_session = load_session(&session_dir, &session_name).ok();
@@ -1463,9 +1535,8 @@ async fn cmd_transactions(cli: &Cli, args: &TransactionsArgs) -> Result<(), Stri
         .from
         .as_deref()
         .map(|s| {
-            NaiveDate::parse_from_str(s, "%Y-%m-%d").map_err(|_| {
-                format!("Invalid date '{}', expected YYYY-MM-DD", s)
-            })
+            NaiveDate::parse_from_str(s, "%Y-%m-%d")
+                .map_err(|_| format!("Invalid date '{}', expected YYYY-MM-DD", s))
         })
         .transpose()?
         .unwrap_or(default_from);
@@ -1474,9 +1545,8 @@ async fn cmd_transactions(cli: &Cli, args: &TransactionsArgs) -> Result<(), Stri
         .to
         .as_deref()
         .map(|s| {
-            NaiveDate::parse_from_str(s, "%Y-%m-%d").map_err(|_| {
-                format!("Invalid date '{}', expected YYYY-MM-DD", s)
-            })
+            NaiveDate::parse_from_str(s, "%Y-%m-%d")
+                .map_err(|_| format!("Invalid date '{}', expected YYYY-MM-DD", s))
         })
         .transpose()?
         .unwrap_or(today);
@@ -1501,7 +1571,11 @@ async fn cmd_transactions(cli: &Cli, args: &TransactionsArgs) -> Result<(), Stri
     wait_for_tan(cli, &mut flow).await?;
 
     let result = flow
-        .confirm_and_fetch_opts(&iban, &bic, &FetchOpts::no_holdings(0).with_range(from_date, Some(to_date)))
+        .confirm_and_fetch_opts(
+            &iban,
+            &bic,
+            &FetchOpts::no_holdings(0).with_range(from_date, Some(to_date)),
+        )
         .await
         .map_err(|e| map_fints_error(&e))?;
     persist_state(cli, &session_name, existing_session.as_ref(), &flow)?;
@@ -1547,10 +1621,7 @@ async fn cmd_transactions(cli: &Cli, args: &TransactionsArgs) -> Result<(), Stri
                     tx.amount.to_string().as_str(),
                     tx.currency.as_str(),
                     tx.applicant_name.as_deref().unwrap_or(""),
-                    tx.applicant_iban
-                        .as_ref()
-                        .map(|i| i.as_str())
-                        .unwrap_or(""),
+                    tx.applicant_iban.as_ref().map(|i| i.as_str()).unwrap_or(""),
                     tx.purpose.as_deref().unwrap_or(""),
                     tx.posting_text.as_deref().unwrap_or(""),
                     &format!("{:?}", tx.status),
@@ -1569,10 +1640,7 @@ async fn cmd_transactions(cli: &Cli, args: &TransactionsArgs) -> Result<(), Stri
 
 async fn cmd_holdings(cli: &Cli, args: &HoldingsArgs) -> Result<(), String> {
     let bank = resolve_bank(cli)?;
-    let session_name = cli
-        .session
-        .clone()
-        .unwrap_or_else(|| bank.blz.clone());
+    let session_name = cli.session.clone().unwrap_or_else(|| bank.blz.clone());
     let session_dir = get_session_dir(cli.session_dir.as_ref());
 
     let existing_session = load_session(&session_dir, &session_name).ok();
@@ -1608,7 +1676,16 @@ async fn cmd_holdings(cli: &Cli, args: &HoldingsArgs) -> Result<(), String> {
 
     // Use confirm_and_fetch_opts with holdings-only fetch for efficiency
     let result = flow
-        .confirm_and_fetch_opts(&iban, &bic, &FetchOpts { balance: false, transactions: false, holdings: true, ..FetchOpts::default() })
+        .confirm_and_fetch_opts(
+            &iban,
+            &bic,
+            &FetchOpts {
+                balance: false,
+                transactions: false,
+                holdings: true,
+                ..FetchOpts::default()
+            },
+        )
         .await
         .map_err(|e| map_fints_error(&e))?;
     persist_state(cli, &session_name, existing_session.as_ref(), &flow)?;
@@ -1676,12 +1753,13 @@ async fn cmd_sessions_inspect(cli: &Cli, name: &str) -> Result<(), String> {
     println!(
         "System ID: {} ({})",
         sys_display,
-        if session.system_id != "0" { "assigned" } else { "unassigned" }
+        if session.system_id != "0" {
+            "assigned"
+        } else {
+            "unassigned"
+        }
     );
-    println!(
-        "BPD v{}  UPD v{}",
-        session.bpd_version, session.upd_version
-    );
+    println!("BPD v{}  UPD v{}", session.bpd_version, session.upd_version);
     println!("Saved: {}", session.saved_at);
 
     println!("\nTAN methods ({}):", session.tan_methods.len());
@@ -1694,10 +1772,7 @@ async fn cmd_sessions_inspect(cli: &Cli, name: &str) -> Result<(), String> {
         } else {
             "[two-step]".to_string()
         };
-        println!(
-            "  #{}  {:<25} {}",
-            m.security_function, m.name, method_type
-        );
+        println!("  #{}  {:<25} {}", m.security_function, m.name, method_type);
     }
 
     if !session.operation_tan_required.is_empty() {
@@ -1708,7 +1783,11 @@ async fn cmd_sessions_inspect(cli: &Cli, name: &str) -> Result<(), String> {
             println!(
                 "  {}: {}",
                 op,
-                if *required { "TAN required" } else { "no TAN required" }
+                if *required {
+                    "TAN required"
+                } else {
+                    "no TAN required"
+                }
             );
         }
     }
@@ -1744,10 +1823,7 @@ async fn cmd_sessions_delete(cli: &Cli, name: &str) -> Result<(), String> {
 async fn cmd_inspect(cli: &Cli) -> Result<(), String> {
     let bank = resolve_bank(cli)?;
 
-    let user_id_str = cli
-        .user
-        .clone()
-        .ok_or("No user ID. Use --user <id>")?;
+    let user_id_str = cli.user.clone().ok_or("No user ID. Use --user <id>")?;
     let pin_str = prompt_pin(cli.pin.as_deref())?;
 
     let user_id = UserId::new(&user_id_str);
@@ -1761,15 +1837,9 @@ async fn cmd_inspect(cli: &Cli) -> Result<(), String> {
     let dialog = Dialog::new(&bank.url, &blz, &user_id, &pin, &product_id)
         .map_err(|e| format!("Dialog error: {}", e))?;
 
-    let (synced, _resp) = dialog
-        .sync()
-        .await
-        .map_err(|e| map_fints_error(&e))?;
+    let (synced, _resp) = dialog.sync().await.map_err(|e| map_fints_error(&e))?;
 
-    let (params, system_id) = synced
-        .end()
-        .await
-        .map_err(|e| map_fints_error(&e))?;
+    let (params, system_id) = synced.end().await.map_err(|e| map_fints_error(&e))?;
 
     println!();
     println!("BLZ:        {}", bank.blz);
@@ -1780,9 +1850,17 @@ async fn cmd_inspect(cli: &Cli) -> Result<(), String> {
         "System ID:  {} ({})",
         {
             let s = system_id.as_str();
-            if s.len() > 24 { &s[..24] } else { s }
+            if s.len() > 24 {
+                &s[..24]
+            } else {
+                s
+            }
         },
-        if system_id.is_assigned() { "assigned" } else { "unassigned" }
+        if system_id.is_assigned() {
+            "assigned"
+        } else {
+            "unassigned"
+        }
     );
 
     println!("\nBPD version: {}", params.bpd_version);
@@ -1817,7 +1895,11 @@ async fn cmd_inspect(cli: &Cli) -> Result<(), String> {
             println!(
                 "  {}: {}",
                 op,
-                if *required { "TAN required" } else { "no TAN required" }
+                if *required {
+                    "TAN required"
+                } else {
+                    "no TAN required"
+                }
             );
         }
     }
@@ -1851,8 +1933,7 @@ async fn cmd_inspect(cli: &Cli) -> Result<(), String> {
 
 async fn cmd_decode(cli: &Cli, args: &DecodeArgs) -> Result<(), String> {
     let raw_bytes: Vec<u8> = if let Some(file) = &args.file {
-        std::fs::read(file)
-            .map_err(|e| format!("Failed to read '{}': {}", file.display(), e))?
+        std::fs::read(file).map_err(|e| format!("Failed to read '{}': {}", file.display(), e))?
     } else {
         let mut buf = Vec::new();
         io::stdin()
@@ -2042,10 +2123,13 @@ fn resolve_iban_bic_from_args(
 ) -> Result<(String, String), String> {
     if let Some(iban_raw) = iban_arg {
         let iban = validate_iban(iban_raw).map_err(|e| format!("Invalid IBAN: {}", e))?;
-        let bic = bic_arg.map(|s| s.to_string())
-            .or_else(|| session
-                .and_then(|s| s.accounts.iter().find(|a| a.iban == iban))
-                .map(|a| a.bic.clone()))
+        let bic = bic_arg
+            .map(|s| s.to_string())
+            .or_else(|| {
+                session
+                    .and_then(|s| s.accounts.iter().find(|a| a.iban == iban))
+                    .map(|a| a.bic.clone())
+            })
             .unwrap_or_default();
         let bic = if bic.is_empty() {
             prompt_input("Account BIC: ")?
@@ -2063,9 +2147,10 @@ fn resolve_iban_bic_from_args(
 
     let iban = prompt_input("Account IBAN: ")?;
     let iban = validate_iban(&iban).map_err(|e| format!("Invalid IBAN: {}", e))?;
-    let bic = bic_arg.map(|s| s.to_string()).or_else(|| {
-        prompt_input("Account BIC: ").ok()
-    }).unwrap_or_default();
+    let bic = bic_arg
+        .map(|s| s.to_string())
+        .or_else(|| prompt_input("Account BIC: ").ok())
+        .unwrap_or_default();
     Ok((iban, bic))
 }
 

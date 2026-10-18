@@ -41,7 +41,9 @@ async fn scripted_bank(responses: Vec<&'static str>) -> (String, Arc<Mutex<Vec<S
     let counter = Arc::new(AtomicUsize::new(0));
     tokio::spawn(async move {
         loop {
-            let Ok((mut sock, _)) = listener.accept().await else { return };
+            let Ok((mut sock, _)) = listener.accept().await else {
+                return;
+            };
             let n = counter.fetch_add(1, Ordering::SeqCst);
             let body = msg(responses[n.min(responses.len() - 1)]);
             let log = log.clone();
@@ -51,25 +53,38 @@ async fn scripted_bank(responses: Vec<&'static str>) -> (String, Arc<Mutex<Vec<S
                 // Read headers, then Content-Length bytes of body.
                 let (header_end, content_length) = loop {
                     let r = sock.read(&mut chunk).await.unwrap_or(0);
-                    if r == 0 { return; }
+                    if r == 0 {
+                        return;
+                    }
                     buf.extend_from_slice(&chunk[..r]);
                     if let Some(pos) = buf.windows(4).position(|w| w == b"\r\n\r\n") {
                         let head = String::from_utf8_lossy(&buf[..pos]).to_ascii_lowercase();
-                        let len = head.lines()
-                            .find_map(|l| l.strip_prefix("content-length:").map(|v| v.trim().parse::<usize>().unwrap_or(0)))
+                        let len = head
+                            .lines()
+                            .find_map(|l| {
+                                l.strip_prefix("content-length:")
+                                    .map(|v| v.trim().parse::<usize>().unwrap_or(0))
+                            })
                             .unwrap_or(0);
                         break (pos + 4, len);
                     }
                 };
                 while buf.len() < header_end + content_length {
                     let r = sock.read(&mut chunk).await.unwrap_or(0);
-                    if r == 0 { break; }
+                    if r == 0 {
+                        break;
+                    }
                     buf.extend_from_slice(&chunk[..r]);
                 }
                 let decoded = B64.decode(&buf[header_end..]).unwrap_or_default();
-                log.lock().unwrap().push(String::from_utf8_lossy(&decoded).into_owned());
+                log.lock()
+                    .unwrap()
+                    .push(String::from_utf8_lossy(&decoded).into_owned());
                 let encoded = B64.encode(body.as_bytes());
-                let head = format!("HTTP/1.1 200 OK\r\nContent-Length: {}\r\nConnection: close\r\n\r\n", encoded.len());
+                let head = format!(
+                    "HTTP/1.1 200 OK\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
+                    encoded.len()
+                );
                 let _ = sock.write_all(head.as_bytes()).await;
                 let _ = sock.write_all(encoded.as_bytes()).await;
                 let _ = sock.shutdown().await;
@@ -113,9 +128,15 @@ async fn pending_dialog(
     params.tan_methods = vec![decoupled_method(max_polls)];
     params.allowed_security_functions = vec![SecurityFunction::new("902")];
     params.select_security_function();
-    let dialog = Dialog::new(url, &Blz::new("50010517"), &UserId::new("u"), &Pin::new("12345"), &ProductId::new("P"))
-        .unwrap()
-        .with_params(&params);
+    let dialog = Dialog::new(
+        url,
+        &Blz::new("50010517"),
+        &UserId::new("u"),
+        &Pin::new("12345"),
+        &ProductId::new("P"),
+    )
+    .unwrap()
+    .with_params(&params);
     match dialog.init().await.unwrap() {
         InitResult::TanRequired(d, challenge, _) => (d, challenge),
         InitResult::Opened(..) => panic!("expected a TAN challenge"),
@@ -131,12 +152,23 @@ async fn polls_until_confirmed_and_reports_progress() {
 
     let mut events = Vec::new();
     let (_open, _resp) = dialog
-        .await_decoupled(&challenge, CancellationToken::new(), &fast_opts(Duration::from_secs(5)), |e| events.push(e))
+        .await_decoupled(
+            &challenge,
+            CancellationToken::new(),
+            &fast_opts(Duration::from_secs(5)),
+            |e| events.push(e),
+        )
         .await
         .expect("should confirm");
 
-    assert!(matches!(events.first(), Some(DecoupledEvent::AwaitingConfirmation { .. })));
-    let pending = events.iter().filter(|e| matches!(e, DecoupledEvent::StillPending { .. })).count();
+    assert!(matches!(
+        events.first(),
+        Some(DecoupledEvent::AwaitingConfirmation { .. })
+    ));
+    let pending = events
+        .iter()
+        .filter(|e| matches!(e, DecoupledEvent::StillPending { .. }))
+        .count();
     assert_eq!(pending, 2);
     assert_eq!(events.last(), Some(&DecoupledEvent::Confirmed { polls: 3 }));
 
@@ -144,7 +176,10 @@ async fn polls_until_confirmed_and_reports_progress() {
     let reqs = requests.lock().unwrap();
     assert_eq!(reqs.len(), 4);
     for poll in &reqs[1..] {
-        assert!(poll.contains("HKTAN:3:7+S++++TASK-42+N'"), "poll was: {poll}");
+        assert!(
+            poll.contains("HKTAN:3:7+S++++TASK-42+N'"),
+            "poll was: {poll}"
+        );
         assert!(!poll.contains("HKIDN"), "polls must not re-init: {poll}");
     }
 }
@@ -154,14 +189,30 @@ async fn stops_at_banks_max_polls() {
     let (url, requests) = scripted_bank(vec![INIT_PUSH_SENT, PENDING]).await;
     let (dialog, challenge) = pending_dialog(&url, 2).await;
     let err = dialog
-        .await_decoupled(&challenge, CancellationToken::new(), &fast_opts(Duration::from_secs(5)), |_| {})
+        .await_decoupled(
+            &challenge,
+            CancellationToken::new(),
+            &fast_opts(Duration::from_secs(5)),
+            |_| {},
+        )
         .await
         .unwrap_err();
-    assert!(matches!(err, FinTSError::DecoupledMaxPolls(2)), "got {err:?}");
+    assert!(
+        matches!(err, FinTSError::DecoupledMaxPolls(2)),
+        "got {err:?}"
+    );
     // init + 2 polls + HKEND
     let reqs = requests.lock().unwrap();
-    assert_eq!(reqs.iter().filter(|r| r.contains("HKTAN") && r.contains("+S+")).count(), 2);
-    assert!(reqs.last().unwrap().contains("HKEND"), "dialog should be ended");
+    assert_eq!(
+        reqs.iter()
+            .filter(|r| r.contains("HKTAN") && r.contains("+S+"))
+            .count(),
+        2
+    );
+    assert!(
+        reqs.last().unwrap().contains("HKEND"),
+        "dialog should be ended"
+    );
 }
 
 #[tokio::test]
@@ -170,7 +221,12 @@ async fn times_out_cleanly_instead_of_hanging() {
     let (dialog, challenge) = pending_dialog(&url, 0).await; // 0 = unlimited per spec
     let started = std::time::Instant::now();
     let err = dialog
-        .await_decoupled(&challenge, CancellationToken::new(), &fast_opts(Duration::from_millis(150)), |_| {})
+        .await_decoupled(
+            &challenge,
+            CancellationToken::new(),
+            &fast_opts(Duration::from_millis(150)),
+            |_| {},
+        )
         .await
         .unwrap_err();
     assert!(matches!(err, FinTSError::TanTimeout), "got {err:?}");
@@ -194,7 +250,10 @@ async fn cancellation_stops_waiting() {
         trigger.cancel();
     });
     let started = std::time::Instant::now();
-    let err = dialog.await_decoupled(&challenge, cancel, &opts, |_| {}).await.unwrap_err();
+    let err = dialog
+        .await_decoupled(&challenge, cancel, &opts, |_| {})
+        .await
+        .unwrap_err();
     assert!(matches!(err, FinTSError::Cancelled), "got {err:?}");
     assert!(started.elapsed() < Duration::from_secs(5));
 }
@@ -204,11 +263,18 @@ async fn bank_error_while_pending_is_returned() {
     let (url, _requests) = scripted_bank(vec![INIT_PUSH_SENT, PENDING, EXPIRED]).await;
     let (dialog, challenge) = pending_dialog(&url, -1).await;
     let err = dialog
-        .await_decoupled(&challenge, CancellationToken::new(), &fast_opts(Duration::from_secs(5)), |_| {})
+        .await_decoupled(
+            &challenge,
+            CancellationToken::new(),
+            &fast_opts(Duration::from_secs(5)),
+            |_| {},
+        )
         .await
         .unwrap_err();
     match err {
-        FinTSError::BankError { message, .. } => assert!(message.contains("abgelaufen") || message.contains("fehlerhaft")),
+        FinTSError::BankError { message, .. } => {
+            assert!(message.contains("abgelaufen") || message.contains("fehlerhaft"))
+        }
         other => panic!("expected bank error, got {other:?}"),
     }
 }
@@ -222,20 +288,38 @@ async fn respects_bank_wait_before_first_poll() {
     params.tan_methods = vec![m];
     params.allowed_security_functions = vec![SecurityFunction::new("902")];
     params.select_security_function();
-    let dialog = Dialog::new(&url, &Blz::new("1"), &UserId::new("u"), &Pin::new("1"), &ProductId::new("P"))
-        .unwrap()
-        .with_params(&params);
-    let InitResult::TanRequired(dialog, challenge, _) = dialog.init().await.unwrap() else { panic!() };
+    let dialog = Dialog::new(
+        &url,
+        &Blz::new("1"),
+        &UserId::new("u"),
+        &Pin::new("1"),
+        &ProductId::new("P"),
+    )
+    .unwrap()
+    .with_params(&params);
+    let InitResult::TanRequired(dialog, challenge, _) = dialog.init().await.unwrap() else {
+        panic!()
+    };
 
     let mut waits = Vec::new();
     let started = std::time::Instant::now();
     dialog
-        .await_decoupled(&challenge, CancellationToken::new(), &fast_opts(Duration::from_secs(5)), |e| {
-            if let DecoupledEvent::Waiting { delay, .. } = e { waits.push(delay) }
-        })
+        .await_decoupled(
+            &challenge,
+            CancellationToken::new(),
+            &fast_opts(Duration::from_secs(5)),
+            |e| {
+                if let DecoupledEvent::Waiting { delay, .. } = e {
+                    waits.push(delay)
+                }
+            },
+        )
         .await
         .unwrap();
-    assert!(started.elapsed() >= Duration::from_millis(900), "bank's 1s minimum wait must be honored");
+    assert!(
+        started.elapsed() >= Duration::from_millis(900),
+        "bank's 1s minimum wait must be honored"
+    );
     assert!(waits[0] > Duration::from_millis(900) && waits[0] <= Duration::from_secs(1));
 }
 
@@ -271,15 +355,31 @@ fn saved_state() -> fints::SessionState {
     fints::SessionState::from_json(&json.to_string()).unwrap()
 }
 
-async fn flow_waiting_for_tan(responses: Vec<&'static str>) -> (fints::Flow, Arc<Mutex<Vec<String>>>) {
+async fn flow_waiting_for_tan(
+    responses: Vec<&'static str>,
+) -> (fints::Flow, Arc<Mutex<Vec<String>>>) {
     let (url, log) = scripted_bank(responses).await;
-    let bank = fints::bank_ops_with_config(fints::BankConfig::new("Test Bank", "12345678", "GENODE23X42", url));
+    let bank = fints::bank_ops_with_config(fints::BankConfig::new(
+        "Test Bank",
+        "12345678",
+        "GENODE23X42",
+        url,
+    ));
     let (flow, info) = fints::Flow::initiate_with_bank(
-        bank, &UserId::new("test1"), &Pin::new("12345"), &ProductId::new("P"), Some(&saved_state()), None, None,
+        bank,
+        &UserId::new("test1"),
+        &Pin::new("12345"),
+        &ProductId::new("P"),
+        Some(&saved_state()),
+        None,
+        None,
     )
     .await
     .expect("initiate");
-    assert!(flow.needs_tan() && !info.decoupled, "expected a TAN-entry challenge: {info:?}");
+    assert!(
+        flow.needs_tan() && !info.decoupled,
+        "expected a TAN-entry challenge: {info:?}"
+    );
     assert_eq!(info.challenge.as_str(), "Bitte geben Sie die TAN ein");
     (flow, log)
 }
@@ -291,8 +391,14 @@ async fn submit_tan_authenticates_the_flow() {
     assert!(!flow.needs_tan());
 
     let sent = log.lock().unwrap().last().cloned().unwrap();
-    assert!(sent.contains("HKTAN:") && sent.contains("TASK-7"), "process 2 for the task: {sent}");
-    assert!(sent.contains("12345:654321"), "PIN and TAN go into HNSHA: {sent}");
+    assert!(
+        sent.contains("HKTAN:") && sent.contains("TASK-7"),
+        "process 2 for the task: {sent}"
+    );
+    assert!(
+        sent.contains("12345:654321"),
+        "PIN and TAN go into HNSHA: {sent}"
+    );
     assert_eq!(flow.accounts().len(), 1);
 }
 
@@ -300,21 +406,38 @@ async fn submit_tan_authenticates_the_flow() {
 async fn rejected_tan_ends_the_flow() {
     let (mut flow, _log) = flow_waiting_for_tan(vec![INIT_TAN_SENT, EXPIRED]).await;
     assert!(flow.submit_tan("000000").await.is_err());
-    let again = flow.submit_tan("000000").await.expect_err("flow is finished");
+    let again = flow
+        .submit_tan("000000")
+        .await
+        .expect_err("flow is finished");
     assert!(again.to_string().contains("already completed"), "{again}");
 }
 
 #[tokio::test]
 async fn submit_tan_refuses_decoupled_challenges() {
     let (url, _log) = scripted_bank(vec![INIT_PUSH_SENT]).await;
-    let bank = fints::bank_ops_with_config(fints::BankConfig::new("Test Bank", "12345678", "GENODE23X42", url));
+    let bank = fints::bank_ops_with_config(fints::BankConfig::new(
+        "Test Bank",
+        "12345678",
+        "GENODE23X42",
+        url,
+    ));
     let (mut flow, info) = fints::Flow::initiate_with_bank(
-        bank, &UserId::new("test1"), &Pin::new("12345"), &ProductId::new("P"), Some(&saved_state()), None, None,
+        bank,
+        &UserId::new("test1"),
+        &Pin::new("12345"),
+        &ProductId::new("P"),
+        Some(&saved_state()),
+        None,
+        None,
     )
     .await
     .expect("initiate");
     assert!(info.decoupled);
-    let err = flow.submit_tan("123456").await.expect_err("decoupled needs await_decoupled");
+    let err = flow
+        .submit_tan("123456")
+        .await
+        .expect_err("decoupled needs await_decoupled");
     assert!(err.to_string().contains("await_decoupled"), "{err}");
     assert!(flow.needs_tan(), "the challenge is still pending");
 }

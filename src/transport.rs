@@ -104,7 +104,10 @@ impl FinTSConnection {
         })?;
 
         debug!("Response: {} bytes decoded", decoded.len());
-        trace!("Response (raw decoded): {}", String::from_utf8_lossy(&decoded));
+        trace!(
+            "Response (raw decoded): {}",
+            String::from_utf8_lossy(&decoded)
+        );
 
         Ok(decoded)
     }
@@ -119,9 +122,7 @@ mod tests {
     /// Spin up a one-shot HTTP server on an ephemeral port. The handler receives
     /// the raw request body and returns an (HTTP status, response body) pair.
     /// Returns the base URL for the connection.
-    async fn serve(
-        handler: impl Fn(Vec<u8>) -> (u16, Vec<u8>) + Send + 'static,
-    ) -> String {
+    async fn serve(handler: impl Fn(Vec<u8>) -> (u16, Vec<u8>) + Send + 'static) -> String {
         let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
         let port = listener.local_addr().unwrap().port();
         tokio::spawn(async move {
@@ -129,7 +130,9 @@ mod tests {
             let mut buf = vec![0u8; 16 * 1024];
             let n = sock.read(&mut buf).await.unwrap();
             // Parse out the request body (everything after the header terminator).
-            let body = match std::str::from_utf8(&buf[..n]).ok().and_then(|s| s.find("\r\n\r\n"))
+            let body = match std::str::from_utf8(&buf[..n])
+                .ok()
+                .and_then(|s| s.find("\r\n\r\n"))
             {
                 Some(idx) => buf[idx + 4..n].to_vec(),
                 None => Vec::new(),

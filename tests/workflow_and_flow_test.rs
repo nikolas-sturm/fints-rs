@@ -8,7 +8,10 @@ use std::io::BufRead;
 use std::process::{Child, Command, Stdio};
 
 use fints::protocol::{Account, BalanceResult};
-use fints::{bank_ops, bank_ops_with_config, AnyBank, BankConfig, BankOps, Dkb, FetchOpts, Flow, Ing, Pin, ProductId, SessionState, UserId};
+use fints::{
+    bank_ops, bank_ops_with_config, AnyBank, BankConfig, BankOps, Dkb, FetchOpts, Flow, Ing, Pin,
+    ProductId, SessionState, UserId,
+};
 
 // ═══════════════════════════════════════════════════════════════════════════
 // Mock server helper
@@ -95,14 +98,20 @@ fn fetch_opts_helpers() {
 #[test]
 fn bank_ops_dispatch_dkb_blz() {
     let bank = bank_ops("12030000").expect("DKB BLZ should resolve");
-    assert!(matches!(bank, AnyBank::Dkb(_)), "BLZ 12030000 must map to Dkb");
+    assert!(
+        matches!(bank, AnyBank::Dkb(_)),
+        "BLZ 12030000 must map to Dkb"
+    );
     assert_eq!(bank.config().blz.as_str(), "12030000");
 }
 
 #[test]
 fn bank_ops_dispatch_ing_blz() {
     let bank = bank_ops("50010517").expect("ING BLZ should resolve");
-    assert!(matches!(bank, AnyBank::Ing(_)), "BLZ 50010517 must map to Ing");
+    assert!(
+        matches!(bank, AnyBank::Ing(_)),
+        "BLZ 50010517 must map to Ing"
+    );
     let c = bank.config();
     assert_eq!(c.blz.as_str(), Ing::BLZ);
     assert_eq!(c.bic.as_str(), "INGDDEFFXXX");
@@ -113,7 +122,10 @@ fn bank_ops_dispatch_ing_blz() {
 #[test]
 fn bank_ops_dispatch_generic_blz() {
     let bank = bank_ops("10070000").expect("known non-DKB BLZ should resolve");
-    assert!(matches!(bank, AnyBank::Generic(_)), "BLZ 10070000 must map to GenericBank");
+    assert!(
+        matches!(bank, AnyBank::Generic(_)),
+        "BLZ 10070000 must map to GenericBank"
+    );
     assert_eq!(bank.config().blz.as_str(), "10070000");
 }
 
@@ -127,7 +139,12 @@ fn bank_ops_unknown_blz_is_error() {
 
 #[test]
 fn bank_ops_with_config_returns_generic() {
-    let config = BankConfig::new("Custom", "12345678", "GENODE23X42", "https://example.invalid/fints");
+    let config = BankConfig::new(
+        "Custom",
+        "12345678",
+        "GENODE23X42",
+        "https://example.invalid/fints",
+    );
     let bank = bank_ops_with_config(config.clone());
     assert!(matches!(bank, AnyBank::Generic(_)));
     assert_eq!(bank.config().blz.as_str(), "12345678");
@@ -152,11 +169,11 @@ fn account_validation_requires_iban_and_bic() {
 
 #[test]
 fn sync_result_serde_roundtrip() {
-    use std::str::FromStr;
     use chrono::NaiveDate;
     use fints::flow::SyncResult;
     use fints::{AccountBalance, Bic, Currency, Iban, Transaction, TransactionStatus};
     use rust_decimal::Decimal;
+    use std::str::FromStr;
 
     let txn = Transaction {
         date: NaiveDate::from_ymd_opt(2025, 1, 15).unwrap(),
@@ -226,7 +243,10 @@ fn test_credentials() -> (UserId, Pin, ProductId) {
 async fn flow_connect_then_confirm_and_fetch() {
     let (child, port) = match spawn_mock_server() {
         Some(v) => v,
-        None => { eprintln!("Skipping: python3 not available"); return; }
+        None => {
+            eprintln!("Skipping: python3 not available");
+            return;
+        }
     };
     let _guard = MockServerGuard(child);
 
@@ -234,23 +254,36 @@ async fn flow_connect_then_confirm_and_fetch() {
     let bank = mock_any_bank(port);
 
     // Step 1: initiate → should be SCA-exempt with the mock (no TAN).
-    let (mut flow, info) = Flow::initiate_with_bank(
-        bank, &user, &pin, &product, None, None, None,
-    ).await.expect("initiate_with_bank failed");
+    let (mut flow, info) = Flow::initiate_with_bank(bank, &user, &pin, &product, None, None, None)
+        .await
+        .expect("initiate_with_bank failed");
 
-    assert!(info.no_tan_required, "mock server should not require TAN on init");
-    assert!(!flow.system_id().as_str().is_empty(), "system_id should be assigned");
+    assert!(
+        info.no_tan_required,
+        "mock server should not require TAN on init"
+    );
+    assert!(
+        !flow.system_id().as_str().is_empty(),
+        "system_id should be assigned"
+    );
 
     // Step 2: fetch everything.
-    let result = flow.confirm_and_fetch("DE111234567800000001", "GENODE23X42", 365)
-        .await.expect("confirm_and_fetch failed");
+    let result = flow
+        .confirm_and_fetch("DE111234567800000001", "GENODE23X42", 365)
+        .await
+        .expect("confirm_and_fetch failed");
 
     let balance = result.balance.expect("balance should be present");
     assert_eq!(balance.amount.to_string(), "1523.42");
     assert_eq!(balance.currency.as_str(), "EUR");
 
     // Mock returns 2 MT940 pages with 3 transaction lines.
-    assert_eq!(result.transactions.len(), 3, "expected 3 transactions, got {:?}", result.transactions);
+    assert_eq!(
+        result.transactions.len(),
+        3,
+        "expected 3 transactions, got {:?}",
+        result.transactions
+    );
     assert_eq!(result.iban.as_str(), "DE111234567800000001");
     assert_eq!(result.bic.as_str(), "GENODE23X42");
     assert!(result.system_id.is_some(), "system_id should be returned");
@@ -260,66 +293,112 @@ async fn flow_connect_then_confirm_and_fetch() {
 async fn flow_reusing_confirm_twice_fails() {
     let (child, port) = match spawn_mock_server() {
         Some(v) => v,
-        None => { eprintln!("Skipping: python3 not available"); return; }
+        None => {
+            eprintln!("Skipping: python3 not available");
+            return;
+        }
     };
     let _guard = MockServerGuard(child);
 
     let (user, pin, product) = test_credentials();
-    let mut flow = Flow::initiate_with_bank(
-        mock_any_bank(port), &user, &pin, &product, None, None, None,
-    ).await.expect("initiate failed").0;
+    let mut flow =
+        Flow::initiate_with_bank(mock_any_bank(port), &user, &pin, &product, None, None, None)
+            .await
+            .expect("initiate failed")
+            .0;
 
     flow.confirm_and_fetch("DE111234567800000001", "GENODE23X42", 30)
-        .await.expect("first fetch should succeed");
+        .await
+        .expect("first fetch should succeed");
 
-    let err = flow.confirm_and_fetch("DE111234567800000001", "GENODE23X42", 30)
-        .await.expect_err("second fetch should fail (flow already completed)");
-    assert!(err.to_string().contains("already completed"), "got: {}", err);
+    let err = flow
+        .confirm_and_fetch("DE111234567800000001", "GENODE23X42", 30)
+        .await
+        .expect_err("second fetch should fail (flow already completed)");
+    assert!(
+        err.to_string().contains("already completed"),
+        "got: {}",
+        err
+    );
 }
 
 #[tokio::test]
 async fn flow_fetch_balance_only() {
     let (child, port) = match spawn_mock_server() {
         Some(v) => v,
-        None => { eprintln!("Skipping: python3 not available"); return; }
+        None => {
+            eprintln!("Skipping: python3 not available");
+            return;
+        }
     };
     let _guard = MockServerGuard(child);
 
     let (user, pin, product) = test_credentials();
-    let mut flow = Flow::initiate_with_bank(
-        mock_any_bank(port), &user, &pin, &product, None, None, None,
-    ).await.expect("initiate failed").0;
+    let mut flow =
+        Flow::initiate_with_bank(mock_any_bank(port), &user, &pin, &product, None, None, None)
+            .await
+            .expect("initiate failed")
+            .0;
 
-    let result = flow.confirm_and_fetch_opts("DE111234567800000001", "GENODE23X42", &FetchOpts::balance_only())
-        .await.expect("balance-only fetch failed");
+    let result = flow
+        .confirm_and_fetch_opts(
+            "DE111234567800000001",
+            "GENODE23X42",
+            &FetchOpts::balance_only(),
+        )
+        .await
+        .expect("balance-only fetch failed");
 
     assert!(result.balance.is_some(), "should have fetched balance");
-    assert!(result.transactions.is_empty(), "transactions should be skipped with balance_only");
-    assert!(result.holdings.is_empty(), "holdings should be skipped with balance_only");
+    assert!(
+        result.transactions.is_empty(),
+        "transactions should be skipped with balance_only"
+    );
+    assert!(
+        result.holdings.is_empty(),
+        "holdings should be skipped with balance_only"
+    );
 }
 
 #[tokio::test]
 async fn flow_fetch_holdings_via_mock() {
     let (child, port) = match spawn_mock_server() {
         Some(v) => v,
-        None => { eprintln!("Skipping: python3 not available"); return; }
+        None => {
+            eprintln!("Skipping: python3 not available");
+            return;
+        }
     };
     let _guard = MockServerGuard(child);
 
     let (user, pin, product) = test_credentials();
-    let mut flow = Flow::initiate_with_bank(
-        mock_any_bank(port), &user, &pin, &product, None, None, None,
-    ).await.expect("initiate failed").0;
+    let mut flow =
+        Flow::initiate_with_bank(mock_any_bank(port), &user, &pin, &product, None, None, None)
+            .await
+            .expect("initiate failed")
+            .0;
 
     // The mock server does not answer HKWPD → expect an empty holdings list.
-    let holdings = flow.confirm_and_fetch_holdings("DE111234567800000001", "GENODE23X42")
-        .await.expect("fetch holdings should not fail against mock");
+    let holdings = flow
+        .confirm_and_fetch_holdings("DE111234567800000001", "GENODE23X42")
+        .await
+        .expect("fetch holdings should not fail against mock");
     assert!(holdings.is_empty(), "mock has no depot data");
 }
 
 #[tokio::test]
 async fn flow_initiate_with_unknown_bank_fails() {
-    match Flow::initiate("99999999", &UserId::new("x"), &Pin::new("1"), &ProductId::new("p"), None, None, None).await {
+    match Flow::initiate(
+        "99999999",
+        &UserId::new("x"),
+        &Pin::new("1"),
+        &ProductId::new("p"),
+        None,
+        None,
+        None,
+    )
+    .await
+    {
         Ok(_) => panic!("expected error for unknown BLZ"),
         Err(e) => assert!(e.to_string().contains("Unknown BLZ"), "got: {}", e),
     }
@@ -329,20 +408,30 @@ async fn flow_initiate_with_unknown_bank_fails() {
 async fn flow_bic_fallback_to_bank_config() {
     let (child, port) = match spawn_mock_server() {
         Some(v) => v,
-        None => { eprintln!("Skipping: python3 not available"); return; }
+        None => {
+            eprintln!("Skipping: python3 not available");
+            return;
+        }
     };
     let _guard = MockServerGuard(child);
 
     let (user, pin, product) = test_credentials();
-    let mut flow = Flow::initiate_with_bank(
-        mock_any_bank(port), &user, &pin, &product, None, None, None,
-    ).await.expect("initiate failed").0;
+    let mut flow =
+        Flow::initiate_with_bank(mock_any_bank(port), &user, &pin, &product, None, None, None)
+            .await
+            .expect("initiate failed")
+            .0;
 
     // Providing an empty BIC falls back to the bank config BIC (GENODE23X42),
     // so the authenticated fetch still succeeds against the mock server.
-    let result = flow.confirm_and_fetch("DE111234567800000001", "", 30)
-        .await.expect("fetch with fallback BIC failed");
-    assert!(result.balance.is_some(), "balance should be fetched despite empty BIC");
+    let result = flow
+        .confirm_and_fetch("DE111234567800000001", "", 30)
+        .await
+        .expect("fetch with fallback BIC failed");
+    assert!(
+        result.balance.is_some(),
+        "balance should be fetched despite empty BIC"
+    );
     assert_eq!(result.transactions.len(), 3);
 }
 
@@ -351,18 +440,31 @@ async fn generic_bank_direct_balance() {
     // Exercise the BankOps::fetch path directly via a GenericBank held in AnyBank.
     let (child, port) = match spawn_mock_server() {
         Some(v) => v,
-        None => { eprintln!("Skipping: python3 not available"); return; }
+        None => {
+            eprintln!("Skipping: python3 not available");
+            return;
+        }
     };
     let _guard = MockServerGuard(child);
 
     let (user, pin, product) = test_credentials();
     let bank = mock_any_bank(port);
 
-    match bank.initiate(&user, &pin, &product, None, None, None).await.expect("initiate") {
+    match bank
+        .initiate(&user, &pin, &product, None, None, None)
+        .await
+        .expect("initiate")
+    {
         fints::InitiateOutcome::Authenticated(mut result) => {
             let account = Account::new("DE111234567800000001", "GENODE23X42").unwrap();
-            let fetch = bank.fetch(&mut result.dialog, &account, 30).await.expect("fetch failed");
-            assert_eq!(fetch.balance.as_ref().map(|b| b.amount.to_string()), Some("1523.42".to_string()));
+            let fetch = bank
+                .fetch(&mut result.dialog, &account, 30)
+                .await
+                .expect("fetch failed");
+            assert_eq!(
+                fetch.balance.as_ref().map(|b| b.amount.to_string()),
+                Some("1523.42".to_string())
+            );
             assert_eq!(fetch.transactions.len(), 3, "expected 3 transactions");
             result.dialog.end().await.ok();
         }
@@ -370,7 +472,11 @@ async fn generic_bank_direct_balance() {
     }
 
     // Directly exercise BalanceResult typing on an authenticated dialog.
-    match bank.initiate(&user, &pin, &product, None, None, None).await.expect("initiate") {
+    match bank
+        .initiate(&user, &pin, &product, None, None, None)
+        .await
+        .expect("initiate")
+    {
         fints::InitiateOutcome::Authenticated(result) => {
             let mut dialog = result.dialog;
             let account = Account::new("DE111234567800000001", "GENODE23X42").unwrap();
@@ -392,17 +498,26 @@ async fn generic_bank_direct_balance() {
 async fn session_state_skips_sync_and_keeps_system_id() {
     let (child, port) = match spawn_mock_server() {
         Some(v) => v,
-        None => { eprintln!("Skipping: python3 not available"); return; }
+        None => {
+            eprintln!("Skipping: python3 not available");
+            return;
+        }
     };
     let _guard = MockServerGuard(child);
     let (user, pin, product) = test_credentials();
 
     // First run: full sync.
-    let (flow, _) = Flow::initiate_with_bank(mock_any_bank(port), &user, &pin, &product, None, None, None)
-        .await.expect("first initiate");
+    let (flow, _) =
+        Flow::initiate_with_bank(mock_any_bank(port), &user, &pin, &product, None, None, None)
+            .await
+            .expect("first initiate");
     let first = flow.finish().await.expect("finish");
     assert!(first.system_id.is_assigned());
-    assert_eq!((first.bpd_version, first.upd_version), (78, 3), "cached versions from HIBPA/HIUPA");
+    assert_eq!(
+        (first.bpd_version, first.upd_version),
+        (78, 3),
+        "cached versions from HIBPA/HIUPA"
+    );
     assert!(first.can_skip_sync());
     assert_eq!(first.accounts().len(), 2);
 
@@ -410,28 +525,59 @@ async fn session_state_skips_sync_and_keeps_system_id() {
     let restored = SessionState::from_json(&first.to_json().unwrap()).unwrap();
 
     // Second run: no HKSYN, so the mock can't hand out a new system ID.
-    let (flow, info) = Flow::initiate_with_bank(mock_any_bank(port), &user, &pin, &product, Some(&restored), None, None)
-        .await.expect("second initiate");
-    assert!(!info.tan_methods.is_empty(), "TAN methods come from the cached BPD");
+    let (flow, info) = Flow::initiate_with_bank(
+        mock_any_bank(port),
+        &user,
+        &pin,
+        &product,
+        Some(&restored),
+        None,
+        None,
+    )
+    .await
+    .expect("second initiate");
+    assert!(
+        !info.tan_methods.is_empty(),
+        "TAN methods come from the cached BPD"
+    );
     let second = flow.finish().await.expect("finish");
-    assert_eq!(second.system_id, first.system_id, "system ID must stay stable across runs");
+    assert_eq!(
+        second.system_id, first.system_id,
+        "system ID must stay stable across runs"
+    );
     assert_eq!((second.bpd_version, second.upd_version), (78, 3));
-    assert_eq!(second.accounts().len(), 2, "UPD kept although the bank didn't resend it");
+    assert_eq!(
+        second.accounts().len(),
+        2,
+        "UPD kept although the bank didn't resend it"
+    );
 }
 
 #[tokio::test]
 async fn session_state_for_other_user_is_ignored() {
     let (child, port) = match spawn_mock_server() {
         Some(v) => v,
-        None => { eprintln!("Skipping: python3 not available"); return; }
+        None => {
+            eprintln!("Skipping: python3 not available");
+            return;
+        }
     };
     let _guard = MockServerGuard(child);
     let (user, pin, product) = test_credentials();
 
     let foreign = SessionState::new(&fints::Blz::new("12345678"), &UserId::new("someone-else"))
         .with_system_id(&fints::SystemId::new("FOREIGN"));
-    let (flow, _) = Flow::initiate_with_bank(mock_any_bank(port), &user, &pin, &product, Some(&foreign), None, None)
-        .await.expect("initiate");
+    let (flow, _) = Flow::initiate_with_bank(
+        mock_any_bank(port),
+        &user,
+        &pin,
+        &product,
+        Some(&foreign),
+        None,
+        None,
+    )
+    .await
+    .expect("initiate");
     let state = flow.finish().await.unwrap();
     assert_ne!(state.system_id.as_str(), "FOREIGN");
     assert_eq!(state.user_id, user);
@@ -441,19 +587,27 @@ async fn session_state_for_other_user_is_ignored() {
 async fn flow_fetches_several_accounts_in_one_dialog() {
     let (child, port) = match spawn_mock_server() {
         Some(v) => v,
-        None => { eprintln!("Skipping: python3 not available"); return; }
+        None => {
+            eprintln!("Skipping: python3 not available");
+            return;
+        }
     };
     let _guard = MockServerGuard(child);
     let (user, pin, product) = test_credentials();
 
-    let (mut flow, info) = Flow::initiate_with_bank(mock_any_bank(port), &user, &pin, &product, None, None, None)
-        .await.expect("initiate");
+    let (mut flow, info) =
+        Flow::initiate_with_bank(mock_any_bank(port), &user, &pin, &product, None, None, None)
+            .await
+            .expect("initiate");
     assert!(info.no_tan_required, "mock grants SCA exemption");
     let accounts: Vec<_> = flow.accounts().to_vec();
     assert_eq!(accounts.len(), 2);
     for acc in &accounts {
         let account = Account::from_sepa(acc, "GENODE23X42").unwrap();
-        let result = flow.fetch(&account, &FetchOpts::no_holdings(30)).await.expect("fetch");
+        let result = flow
+            .fetch(&account, &FetchOpts::no_holdings(30))
+            .await
+            .expect("fetch");
         assert!(result.balance.is_some(), "balance for {}", acc.iban);
     }
     let state = flow.finish().await.unwrap();
@@ -467,7 +621,11 @@ fn flow_futures_are_send() {
     fn is_send<T: Send>(_: T) {}
     async fn run(mut flow: Flow) {
         let _ = flow
-            .await_decoupled(fints::CancellationToken::new(), &fints::DecoupledOptions::default(), |_| {})
+            .await_decoupled(
+                fints::CancellationToken::new(),
+                &fints::DecoupledOptions::default(),
+                |_| {},
+            )
             .await;
         let account = Account::new("DE89370400440532013000", "COBADEFFXXX").unwrap();
         let _ = flow.fetch(&account, &FetchOpts::all(30)).await;

@@ -11,26 +11,12 @@
 //! ```
 
 use axum::{
-    body::Bytes,
-    extract::State,
-    http::StatusCode,
-    response::IntoResponse,
-    routing::post,
-    Router,
+    body::Bytes, extract::State, http::StatusCode, response::IntoResponse, routing::post, Router,
 };
 use base64::{engine::general_purpose::STANDARD as BASE64, Engine as _};
 use clap::{Parser, ValueEnum};
-use std::{
-    collections::HashMap,
-    path::PathBuf,
-    sync::Arc,
-    time::Duration,
-};
-use tokio::{
-    net::TcpListener,
-    sync::Mutex,
-    time::Instant,
-};
+use std::{collections::HashMap, path::PathBuf, sync::Arc, time::Duration};
+use tokio::{net::TcpListener, sync::Mutex, time::Instant};
 use tracing::{info, warn};
 
 // ═══════════════════════════════════════════════════════════════════════════════
@@ -38,7 +24,10 @@ use tracing::{info, warn};
 // ═══════════════════════════════════════════════════════════════════════════════
 
 #[derive(Parser, Debug)]
-#[command(name = "fints-server", about = "FinTS 3.0 mock server for testing and development")]
+#[command(
+    name = "fints-server",
+    about = "FinTS 3.0 mock server for testing and development"
+)]
 struct Cli {
     /// Port to listen on (0 = random)
     #[arg(short, long, default_value = "3000")]
@@ -320,10 +309,7 @@ fn build_transaction_pages() -> Vec<Vec<u8>> {
         b"-",
     ];
 
-    vec![
-        build_mt940_block(&page0),
-        build_mt940_block(&page1),
-    ]
+    vec![build_mt940_block(&page0), build_mt940_block(&page1)]
 }
 
 fn build_mt940_block(lines: &[&[u8]]) -> Vec<u8> {
@@ -410,16 +396,21 @@ fn extract_pin_tan(message: &[u8]) -> (Option<String>, Option<String>) {
                         // PIN:TAN field starts at i+1
                         let pin_tan_start = i + 1;
                         // Field ends at segment terminator '\'' (not at another '+' since PIN may have none)
-                        let end = seg[pin_tan_start..].iter()
+                        let end = seg[pin_tan_start..]
+                            .iter()
                             .position(|&b| b == b'\'')
                             .map(|p| pin_tan_start + p)
                             .unwrap_or(seg.len());
                         let pin_tan = &seg[pin_tan_start..end];
                         // Check if there's a colon separating PIN from TAN
                         if let Some(colon_pos) = pin_tan.iter().position(|&b| b == b':') {
-                            pin = std::str::from_utf8(&pin_tan[..colon_pos]).ok().map(|s| s.to_string());
+                            pin = std::str::from_utf8(&pin_tan[..colon_pos])
+                                .ok()
+                                .map(|s| s.to_string());
                             if colon_pos + 1 < pin_tan.len() {
-                                tan = std::str::from_utf8(&pin_tan[colon_pos + 1..]).ok().map(|s| s.to_string());
+                                tan = std::str::from_utf8(&pin_tan[colon_pos + 1..])
+                                    .ok()
+                                    .map(|s| s.to_string());
                             }
                         } else {
                             pin = std::str::from_utf8(pin_tan).ok().map(|s| s.to_string());
@@ -442,19 +433,25 @@ fn extract_pin_tan(message: &[u8]) -> (Option<String>, Option<String>) {
 /// Check if a segment type is present in message
 fn has_segment(message: &[u8], seg_type: &str) -> bool {
     let needle = format!("{}:", seg_type);
-    message.windows(needle.len()).any(|w| w == needle.as_bytes())
+    message
+        .windows(needle.len())
+        .any(|w| w == needle.as_bytes())
 }
 
 /// Extract segment number and version for a given segment type
 fn extract_seg_num_ver(message: &[u8], seg_type: &str) -> Option<(String, String)> {
     let prefix = format!("{}:", seg_type);
-    let pos = message.windows(prefix.len()).position(|w| w == prefix.as_bytes())?;
+    let pos = message
+        .windows(prefix.len())
+        .position(|w| w == prefix.as_bytes())?;
     let after = &message[pos + prefix.len()..];
     // Next is segno:version
     let colon1 = after.iter().position(|&b| b == b':')?;
     let segno = std::str::from_utf8(&after[..colon1]).ok()?.to_string();
     let after2 = &after[colon1 + 1..];
-    let end = after2.iter().position(|&b| b == b'+' || b == b':' || b == b'\'')?;
+    let end = after2
+        .iter()
+        .position(|&b| b == b'+' || b == b':' || b == b'\'')?;
     let version = std::str::from_utf8(&after2[..end]).ok()?.to_string();
     Some((segno, version))
 }
@@ -566,11 +563,7 @@ HIUPD:59:6:4+2::280:12345678+DE111234567800000002+GENODE23X42+test1+EUR+Fullname
 // Main handler logic
 // ═══════════════════════════════════════════════════════════════════════════════
 
-async fn make_answer(
-    state: &mut ServerState,
-    _dialog_id: &str,
-    message: &[u8],
-) -> Vec<u8> {
+async fn make_answer(state: &mut ServerState, _dialog_id: &str, message: &[u8]) -> Vec<u8> {
     // Get the inner message (from HNVSD or the raw message if it's a simple error)
     let _inner_message = extract_hnvsd(message).unwrap_or_else(|| message.to_vec());
 
@@ -579,7 +572,12 @@ async fn make_answer(
     let pin = pin_opt.as_deref().unwrap_or("");
 
     let is_valid_pin = state.config.fixtures.valid_pins.iter().any(|p| p == pin);
-    let is_temp_locked = state.config.fixtures.temp_locked_pins.iter().any(|p| p == pin);
+    let is_temp_locked = state
+        .config
+        .fixtures
+        .temp_locked_pins
+        .iter()
+        .any(|p| p == pin);
 
     if !is_valid_pin && !is_temp_locked {
         // Wrong PIN — return error immediately (no envelope yet, just inner)
@@ -637,7 +635,12 @@ async fn make_answer(
             state.system_counter = count;
             format!("{};{:05}", state.system_prefix, count)
         };
-        state.systems.insert(system_id.clone(), SystemInfo { system_id: system_id.clone() });
+        state.systems.insert(
+            system_id.clone(),
+            SystemInfo {
+                system_id: system_id.clone(),
+            },
+        );
         let hisyn = format!("HISYN::4:5+{}'", system_id);
         result.extend_from_slice(hisyn.as_bytes());
     }
@@ -645,15 +648,31 @@ async fn make_answer(
     // Handle HKSPA — SEPA account list
     if has_segment(message, "HKSPA") {
         result.extend_from_slice(
-            b"HISPA::1:4+J:DE111234567800000001:GENODE23X42:00001::280:12345678'"
+            b"HISPA::1:4+J:DE111234567800000001:GENODE23X42:00001::280:12345678'",
         );
     }
 
     // Handle HKSAL — balance
     if let Some((segno, _)) = extract_seg_num_ver(message, "HKSAL") {
-        let balance = state.config.fixtures.accounts.first()
-            .map(|a| (a.balance.clone(), a.currency.clone(), a.balance_date.clone()))
-            .unwrap_or_else(|| ("1523,42".to_string(), "EUR".to_string(), "20250115".to_string()));
+        let balance = state
+            .config
+            .fixtures
+            .accounts
+            .first()
+            .map(|a| {
+                (
+                    a.balance.clone(),
+                    a.currency.clone(),
+                    a.balance_date.clone(),
+                )
+            })
+            .unwrap_or_else(|| {
+                (
+                    "1523,42".to_string(),
+                    "EUR".to_string(),
+                    "20250115".to_string(),
+                )
+            });
 
         let hirms = format!("HIRMS::2:{segno}+0010::Saldo ermittelt'", segno = segno);
         let hisal = format!(
@@ -680,19 +699,12 @@ async fn make_answer(
             );
             result.extend_from_slice(hirms.as_bytes());
         } else {
-            let hirms = format!(
-                "HIRMS::2:{segno}+0010::Umsaetze geliefert'",
-                segno = segno,
-            );
+            let hirms = format!("HIRMS::2:{segno}+0010::Umsaetze geliefert'", segno = segno,);
             result.extend_from_slice(hirms.as_bytes());
         }
 
         let tx = &transactions[startat.min(transactions.len() - 1)];
-        let hikaz_prefix = format!(
-            "HIKAZ::7:{segno}+@{len}@",
-            segno = segno,
-            len = tx.len(),
-        );
+        let hikaz_prefix = format!("HIKAZ::7:{segno}+@{len}@", segno = segno, len = tx.len(),);
         result.extend_from_slice(hikaz_prefix.as_bytes());
         result.extend_from_slice(tx);
         result.extend_from_slice(b"'");
@@ -704,8 +716,12 @@ async fn make_answer(
         result.extend_from_slice(hirms.as_bytes());
 
         // Per WPDepotListRes the payload is one binary MT535 statement.
-        let mt535 = build_mt535(&state.config.fixtures.holdings, &state.config.fixtures.accounts);
-        let mut hiwpd = format!("HIWPD::6:{segno}+@{len}@", segno = segno, len = mt535.len()).into_bytes();
+        let mt535 = build_mt535(
+            &state.config.fixtures.holdings,
+            &state.config.fixtures.accounts,
+        );
+        let mut hiwpd =
+            format!("HIWPD::6:{segno}+@{len}@", segno = segno, len = mt535.len()).into_bytes();
         hiwpd.extend_from_slice(mt535.as_bytes());
         hiwpd.push(b'\'');
         result.extend_from_slice(&hiwpd);
@@ -740,18 +756,22 @@ fn build_mt535(holdings: &[MockHolding], accounts: &[MockAccount]) -> String {
         s.push_str(&format!(
             ":16R:FIN\r\n:35B:ISIN {}\r\n/DE/{}\r\n{}\r\n:90B::MRKT//ACTU/{}{}\r\n\
              :98A::PRIC//{}\r\n:93B::AGGR//UNIT/{}\r\n:19A::HOLD//{}{}\r\n:16S:FIN\r\n",
-            h.isin, h.wkn, h.name, h.price_currency, h.price, h.price_date, h.quantity,
-            h.price_currency, h.market_value,
+            h.isin,
+            h.wkn,
+            h.name,
+            h.price_currency,
+            h.price,
+            h.price_date,
+            h.quantity,
+            h.price_currency,
+            h.market_value,
         ));
     }
     s.push('-');
     s
 }
 
-async fn handle_fints_request(
-    State(state): State<SharedState>,
-    body: Bytes,
-) -> impl IntoResponse {
+async fn handle_fints_request(State(state): State<SharedState>, body: Bytes) -> impl IntoResponse {
     // Decode base64 request
     let message = match BASE64.decode(&body) {
         Ok(m) => m,
@@ -764,8 +784,14 @@ async fn handle_fints_request(
     let locked = state.lock().await;
 
     if locked.config.verbose {
-        info!("[wire] REQUEST ({} bytes): {}", message.len(),
-            String::from_utf8_lossy(&message).chars().take(300).collect::<String>());
+        info!(
+            "[wire] REQUEST ({} bytes): {}",
+            message.len(),
+            String::from_utf8_lossy(&message)
+                .chars()
+                .take(300)
+                .collect::<String>()
+        );
     }
     if locked.config.debug_wire {
         info!("[wire] REQUEST HEX: {}", hex_dump(&message));
@@ -789,21 +815,27 @@ async fn handle_fints_request(
         let count = locked.dialog_counter + 1;
         locked.dialog_counter = count;
         let new_id = format!("{};{:05}", locked.dialog_prefix, count);
-        locked.dialogs.insert(new_id.clone(), DialogState {
-            dialog_id: new_id.clone(),
-            message_count: 0,
-            tan_state: TanState::None,
-        });
+        locked.dialogs.insert(
+            new_id.clone(),
+            DialogState {
+                dialog_id: new_id.clone(),
+                message_count: 0,
+                tan_state: TanState::None,
+            },
+        );
         new_id
     } else {
         // Existing dialog
         if !locked.dialogs.contains_key(&dialog_id_raw) {
             // Auto-create if missing (for robustness)
-            locked.dialogs.insert(dialog_id_raw.clone(), DialogState {
-                dialog_id: dialog_id_raw.clone(),
-                message_count: 0,
-                tan_state: TanState::None,
-            });
+            locked.dialogs.insert(
+                dialog_id_raw.clone(),
+                DialogState {
+                    dialog_id: dialog_id_raw.clone(),
+                    message_count: 0,
+                    tan_state: TanState::None,
+                },
+            );
         }
         dialog_id_raw
     };
@@ -819,8 +851,14 @@ async fn handle_fints_request(
     let inner = make_answer(&mut locked, &dialog_id, &message).await;
 
     if locked.config.verbose {
-        info!("[wire] INNER RESPONSE ({} bytes): {}", inner.len(),
-            String::from_utf8_lossy(&inner).chars().take(300).collect::<String>());
+        info!(
+            "[wire] INNER RESPONSE ({} bytes): {}",
+            inner.len(),
+            String::from_utf8_lossy(&inner)
+                .chars()
+                .take(300)
+                .collect::<String>()
+        );
     }
 
     // Wrap in envelope
@@ -838,7 +876,11 @@ async fn handle_fints_request(
 }
 
 fn hex_dump(data: &[u8]) -> String {
-    data.iter().take(128).map(|b| format!("{:02x}", b)).collect::<Vec<_>>().join(" ")
+    data.iter()
+        .take(128)
+        .map(|b| format!("{:02x}", b))
+        .collect::<Vec<_>>()
+        .join(" ")
 }
 
 // ═══════════════════════════════════════════════════════════════════════════════
@@ -858,7 +900,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     tracing_subscriber::fmt()
         .with_env_filter(
             tracing_subscriber::EnvFilter::try_from_default_env()
-                .unwrap_or_else(|_| tracing_subscriber::EnvFilter::new(filter))
+                .unwrap_or_else(|_| tracing_subscriber::EnvFilter::new(filter)),
         )
         .with_target(false)
         .init();
@@ -871,11 +913,17 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     // Use only alphanumeric characters.
     let dialog_prefix = {
         let bytes: Vec<u8> = (0..9).map(|_| rand::random::<u8>()).collect();
-        bytes.iter().map(|b| format!("{:02x}", b)).collect::<String>()
+        bytes
+            .iter()
+            .map(|b| format!("{:02x}", b))
+            .collect::<String>()
     };
     let system_prefix = {
         let bytes: Vec<u8> = (0..9).map(|_| rand::random::<u8>()).collect();
-        bytes.iter().map(|b| format!("{:02x}", b)).collect::<String>()
+        bytes
+            .iter()
+            .map(|b| format!("{:02x}", b))
+            .collect::<String>()
     };
 
     // Bind listener first to know the actual port

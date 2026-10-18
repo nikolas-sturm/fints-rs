@@ -38,14 +38,22 @@ fn split_segments(msg: &[u8]) -> Vec<&[u8]> {
 /// Join segments; `Borrowed` if the result equals the input.
 fn rebuild<'a>(original: &'a [u8], segments: &[Cow<'_, [u8]>]) -> Cow<'a, [u8]> {
     let out: Vec<u8> = segments.iter().flat_map(|s| s.iter().copied()).collect();
-    if out == original { Cow::Borrowed(original) } else { Cow::Owned(out) }
+    if out == original {
+        Cow::Borrowed(original)
+    } else {
+        Cow::Owned(out)
+    }
 }
 
 /// Replace DE `de_idx` of DEG `deg_idx` in a raw segment.
 fn replace_de(seg: &[u8], deg_idx: usize, de_idx: usize, value: &[u8]) -> Option<Vec<u8>> {
     let deg = wire::degs(seg).get(deg_idx)?.clone();
     let de = wire::des(&seg[deg.clone()]).get(de_idx)?.clone();
-    Some(wire::splice(seg, deg.start + de.start..deg.start + de.end, value))
+    Some(wire::splice(
+        seg,
+        deg.start + de.start..deg.start + de.end,
+        value,
+    ))
 }
 
 /// Text of DE `de_idx` of DEG `deg_idx` (raw bytes, escapes untouched).
@@ -70,7 +78,9 @@ fn segment_version(seg: &[u8]) -> Option<u16> {
 pub struct InvalidSegment;
 
 impl Quirk for InvalidSegment {
-    fn name(&self) -> &'static str { "InvalidSegment" }
+    fn name(&self) -> &'static str {
+        "InvalidSegment"
+    }
 
     fn incoming<'a>(&self, msg: &'a [u8], _ctx: &QuirkContext<'_>) -> Cow<'a, [u8]> {
         let segs: Vec<Cow<[u8]>> = split_segments(msg)
@@ -91,10 +101,13 @@ impl Quirk for InvalidSegment {
 pub struct WrongStatusSegOrder;
 
 impl Quirk for WrongStatusSegOrder {
-    fn name(&self) -> &'static str { "WrongStatusSegOrder" }
+    fn name(&self) -> &'static str {
+        "WrongStatusSegOrder"
+    }
 
     fn incoming<'a>(&self, msg: &'a [u8], _ctx: &QuirkContext<'_>) -> Cow<'a, [u8]> {
-        let (mut header, mut glob, mut seg_status, mut data) = (Vec::new(), Vec::new(), Vec::new(), Vec::new());
+        let (mut header, mut glob, mut seg_status, mut data) =
+            (Vec::new(), Vec::new(), Vec::new(), Vec::new());
         let (mut in_header, mut in_glob, mut in_seg, mut in_data) = (true, false, false, false);
         let mut error = false;
 
@@ -134,7 +147,8 @@ impl Quirk for WrongStatusSegOrder {
         if !error {
             return Cow::Borrowed(msg);
         }
-        let ordered: Vec<Cow<[u8]>> = header.into_iter()
+        let ordered: Vec<Cow<[u8]>> = header
+            .into_iter()
             .chain(glob)
             .chain(seg_status)
             .chain(data)
@@ -154,7 +168,9 @@ impl Quirk for WrongStatusSegOrder {
 pub struct WrongSequenceNumbers;
 
 impl Quirk for WrongSequenceNumbers {
-    fn name(&self) -> &'static str { "WrongSequenceNumbers" }
+    fn name(&self) -> &'static str {
+        "WrongSequenceNumbers"
+    }
 
     fn incoming<'a>(&self, msg: &'a [u8], _ctx: &QuirkContext<'_>) -> Cow<'a, [u8]> {
         let segs: Vec<Cow<[u8]>> = split_segments(msg)
@@ -163,9 +179,11 @@ impl Quirk for WrongSequenceNumbers {
             .map(|(i, seg)| {
                 let expected = (i + 1).to_string();
                 match de_bytes(seg, 0, 1) {
-                    Some(seq) if seq != expected.as_bytes() => replace_de(seg, 0, 1, expected.as_bytes())
-                        .map(Cow::Owned)
-                        .unwrap_or(Cow::Borrowed(seg)),
+                    Some(seq) if seq != expected.as_bytes() => {
+                        replace_de(seg, 0, 1, expected.as_bytes())
+                            .map(Cow::Owned)
+                            .unwrap_or(Cow::Borrowed(seg))
+                    }
                     _ => Cow::Borrowed(seg),
                 }
             })
@@ -184,10 +202,14 @@ impl Quirk for WrongSequenceNumbers {
 pub struct MissingMsgRef;
 
 impl Quirk for MissingMsgRef {
-    fn name(&self) -> &'static str { "MissingMsgRef" }
+    fn name(&self) -> &'static str {
+        "MissingMsgRef"
+    }
 
     fn incoming_raw<'a>(&self, msg: &'a [u8], ctx: &QuirkContext<'_>) -> Cow<'a, [u8]> {
-        let Some(first) = wire::segments(msg).into_iter().next() else { return Cow::Borrowed(msg) };
+        let Some(first) = wire::segments(msg).into_iter().next() else {
+            return Cow::Borrowed(msg);
+        };
         let seg = &msg[first.clone()];
         if wire::segment_type(seg) != b"HNHBK" || wire::degs(seg).len() != 5 {
             return Cow::Borrowed(msg);
@@ -197,7 +219,11 @@ impl Quirk for MissingMsgRef {
         if msg.get(insert_at) != Some(&b'\'') {
             return Cow::Borrowed(msg);
         }
-        Cow::Owned(wire::splice(msg, insert_at..insert_at, reference.as_bytes()))
+        Cow::Owned(wire::splice(
+            msg,
+            insert_at..insert_at,
+            reference.as_bytes(),
+        ))
     }
 }
 
@@ -209,15 +235,21 @@ impl Quirk for MissingMsgRef {
 pub struct HbciVersion;
 
 impl Quirk for HbciVersion {
-    fn name(&self) -> &'static str { "HBCIVersion" }
+    fn name(&self) -> &'static str {
+        "HBCIVersion"
+    }
 
     fn incoming_raw<'a>(&self, msg: &'a [u8], ctx: &QuirkContext<'_>) -> Cow<'a, [u8]> {
-        let Some(first) = wire::segments(msg).into_iter().next() else { return Cow::Borrowed(msg) };
+        let Some(first) = wire::segments(msg).into_iter().next() else {
+            return Cow::Borrowed(msg);
+        };
         let seg = &msg[first.clone()];
         if wire::segment_type(seg) != b"HNHBK" {
             return Cow::Borrowed(msg);
         }
-        let Some(deg) = wire::degs(seg).get(2).cloned() else { return Cow::Borrowed(msg) };
+        let Some(deg) = wire::degs(seg).get(2).cloned() else {
+            return Cow::Borrowed(msg);
+        };
         let version = &seg[deg.clone()];
         if !(version.is_empty() || version == b"0") {
             return Cow::Borrowed(msg);
@@ -237,7 +269,9 @@ impl Quirk for HbciVersion {
 pub struct SigIdLeadingZero;
 
 impl Quirk for SigIdLeadingZero {
-    fn name(&self) -> &'static str { "SigIdLeadingZero" }
+    fn name(&self) -> &'static str {
+        "SigIdLeadingZero"
+    }
 
     fn incoming<'a>(&self, msg: &'a [u8], _ctx: &QuirkContext<'_>) -> Cow<'a, [u8]> {
         let mut fixed = false;
@@ -248,11 +282,22 @@ impl Quirk for SigIdLeadingZero {
                     return Cow::Borrowed(seg);
                 }
                 fixed = true; // only the first HNSHK, like the original
-                let idx = if segment_version(seg).unwrap_or(4) >= 4 { 7 } else { 6 };
+                let idx = if segment_version(seg).unwrap_or(4) >= 4 {
+                    7
+                } else {
+                    6
+                };
                 match de_bytes(seg, idx, 0) {
-                    Some(id) if id.len() > 1 && id[0] == b'0' && id.iter().all(u8::is_ascii_digit) => {
-                        let trimmed = id.iter().position(|b| *b != b'0').map_or(&id[id.len() - 1..], |p| &id[p..]);
-                        replace_de(seg, idx, 0, trimmed).map(Cow::Owned).unwrap_or(Cow::Borrowed(seg))
+                    Some(id)
+                        if id.len() > 1 && id[0] == b'0' && id.iter().all(u8::is_ascii_digit) =>
+                    {
+                        let trimmed = id
+                            .iter()
+                            .position(|b| *b != b'0')
+                            .map_or(&id[id.len() - 1..], |p| &id[p..]);
+                        replace_de(seg, idx, 0, trimmed)
+                            .map(Cow::Owned)
+                            .unwrap_or(Cow::Borrowed(seg))
                     }
                     _ => Cow::Borrowed(seg),
                 }
@@ -272,7 +317,9 @@ impl Quirk for SigIdLeadingZero {
 pub struct InvalidSuppHbciVersion;
 
 impl Quirk for InvalidSuppHbciVersion {
-    fn name(&self) -> &'static str { "InvalidSuppHBCIVersion" }
+    fn name(&self) -> &'static str {
+        "InvalidSuppHBCIVersion"
+    }
 
     fn incoming<'a>(&self, msg: &'a [u8], _ctx: &QuirkContext<'_>) -> Cow<'a, [u8]> {
         let segs: Vec<Cow<[u8]>> = split_segments(msg)
@@ -282,11 +329,15 @@ impl Quirk for InvalidSuppHbciVersion {
                     return Cow::Borrowed(seg);
                 }
                 // HIBPA (BPA3): header, version, KIK, name, numgva, SuppLangs, SuppVersions (DEG 6)
-                let Some(deg) = wire::degs(seg).get(6).cloned() else { return Cow::Borrowed(seg) };
+                let Some(deg) = wire::degs(seg).get(6).cloned() else {
+                    return Cow::Borrowed(seg);
+                };
                 let deg_bytes = &seg[deg.clone()];
                 let mut out = Vec::with_capacity(deg_bytes.len() + 8);
                 for (i, de) in wire::des(deg_bytes).into_iter().enumerate() {
-                    if i > 0 { out.push(b':'); }
+                    if i > 0 {
+                        out.push(b':');
+                    }
                     out.extend_from_slice(match &deg_bytes[de] {
                         b"2" => b"210",
                         b"3" => b"300",
@@ -315,7 +366,9 @@ impl Quirk for InvalidSuppHbciVersion {
 pub struct SecTypeTan;
 
 impl Quirk for SecTypeTan {
-    fn name(&self) -> &'static str { "SecTypeTAN" }
+    fn name(&self) -> &'static str {
+        "SecTypeTAN"
+    }
 
     fn incoming<'a>(&self, msg: &'a [u8], _ctx: &QuirkContext<'_>) -> Cow<'a, [u8]> {
         let mut segs: Vec<Cow<[u8]>> = Vec::new();
@@ -326,7 +379,9 @@ impl Quirk for SecTypeTan {
             }
             // HISHV: header + mixing allowed (J/N) + SuppSecMethods DEGs (method:version…)
             let degs = wire::degs(seg);
-            let kept: Vec<_> = degs.iter().enumerate()
+            let kept: Vec<_> = degs
+                .iter()
+                .enumerate()
                 .filter(|(i, d)| *i < 2 || wire::segment_type(&seg[(*d).clone()]) != b"TAN")
                 .map(|(_, d)| &seg[d.clone()])
                 .collect();
@@ -347,7 +402,11 @@ impl Quirk for SecTypeTan {
 mod tests {
     use super::*;
 
-    const CTX: QuirkContext<'static> = QuirkContext { hbci_version: "300", dialog_id: "DLG-7", message_number: 3 };
+    const CTX: QuirkContext<'static> = QuirkContext {
+        hbci_version: "300",
+        dialog_id: "DLG-7",
+        message_number: 3,
+    };
 
     fn run(q: &dyn Quirk, msg: &str) -> String {
         String::from_utf8(q.incoming(msg.as_bytes(), &CTX).into_owned()).unwrap()
@@ -358,8 +417,16 @@ mod tests {
     }
 
     fn unchanged(q: &dyn Quirk, msg: &str) {
-        assert!(matches!(q.incoming(msg.as_bytes(), &CTX), Cow::Borrowed(_)), "{} touched: {msg}", q.name());
-        assert!(matches!(q.incoming_raw(msg.as_bytes(), &CTX), Cow::Borrowed(_)), "{} touched: {msg}", q.name());
+        assert!(
+            matches!(q.incoming(msg.as_bytes(), &CTX), Cow::Borrowed(_)),
+            "{} touched: {msg}",
+            q.name()
+        );
+        assert!(
+            matches!(q.incoming_raw(msg.as_bytes(), &CTX), Cow::Borrowed(_)),
+            "{} touched: {msg}",
+            q.name()
+        );
     }
 
     const GOOD: &str = "HNHBK:1:3+000000000120+300+DLG-7+3+DLG-7:3'HNSHK:2:4+PIN:1+999+1234567+1+1+2::SYS+1+1:20260101:120000'\
@@ -376,7 +443,10 @@ mod tests {
     #[test]
     fn invalid_segment_removes_iidia() {
         // RInvalidSegment: "'IIDIA:" … "'" is deleted.
-        let fixed = run(&InvalidSegment, "HNHBK:1:3+1+300+D+1'HIRMG:2:2+0010::ok'IIDIA:3:1+X+Y'HNHBS:4:1+1'");
+        let fixed = run(
+            &InvalidSegment,
+            "HNHBK:1:3+1+300+D+1'HIRMG:2:2+0010::ok'IIDIA:3:1+X+Y'HNHBS:4:1+1'",
+        );
         assert_eq!(fixed, "HNHBK:1:3+1+300+D+1'HIRMG:2:2+0010::ok'HNHBS:4:1+1'");
     }
 
@@ -387,7 +457,10 @@ mod tests {
             &WrongStatusSegOrder,
             "HNHBK:1:3+1'HISAL:2:7:3+X'HIRMS:3:2:3+0020::ok'HIRMG:4:2+0010::ok'HNHBS:5:1+1'",
         );
-        assert_eq!(fixed, "HNHBK:1:3+1'HIRMG:4:2+0010::ok'HIRMS:3:2:3+0020::ok'HISAL:2:7:3+X'HNHBS:5:1+1'");
+        assert_eq!(
+            fixed,
+            "HNHBK:1:3+1'HIRMG:4:2+0010::ok'HIRMS:3:2:3+0020::ok'HISAL:2:7:3+X'HNHBS:5:1+1'"
+        );
     }
 
     #[test]
@@ -397,20 +470,32 @@ mod tests {
             &WrongSequenceNumbers,
             "HNHBK:1:3+1'HIRMG:7:2+0010::ok'HIKAZ::7:3+@12@'XX:99:1+ab''HNHBS:9:1+1'",
         );
-        assert_eq!(fixed, "HNHBK:1:3+1'HIRMG:2:2+0010::ok'HIKAZ:3:7:3+@12@'XX:99:1+ab''HNHBS:4:1+1'");
+        assert_eq!(
+            fixed,
+            "HNHBK:1:3+1'HIRMG:2:2+0010::ok'HIKAZ:3:7:3+@12@'XX:99:1+ab''HNHBS:4:1+1'"
+        );
     }
 
     #[test]
     fn status_order_then_sequence_numbers_compose() {
         let msg = "HNHBK:1:3+1'HISAL:2:7:3+X'HIRMG:3:2+0010::ok'HNHBS:4:1+1'";
         let step1 = run(&WrongStatusSegOrder, msg);
-        assert_eq!(run(&WrongSequenceNumbers, &step1), "HNHBK:1:3+1'HIRMG:2:2+0010::ok'HISAL:3:7:3+X'HNHBS:4:1+1'");
+        assert_eq!(
+            run(&WrongSequenceNumbers, &step1),
+            "HNHBK:1:3+1'HIRMG:2:2+0010::ok'HISAL:3:7:3+X'HNHBS:4:1+1'"
+        );
     }
 
     #[test]
     fn missing_msg_ref_is_rebuilt_from_request() {
-        let fixed = run_raw(&MissingMsgRef, "HNHBK:1:3+000000000100+300+DLG-7+3'HNHBS:2:1+3'");
-        assert_eq!(fixed, "HNHBK:1:3+000000000100+300+DLG-7+3+DLG-7:3'HNHBS:2:1+3'");
+        let fixed = run_raw(
+            &MissingMsgRef,
+            "HNHBK:1:3+000000000100+300+DLG-7+3'HNHBS:2:1+3'",
+        );
+        assert_eq!(
+            fixed,
+            "HNHBK:1:3+000000000100+300+DLG-7+3+DLG-7:3'HNHBS:2:1+3'"
+        );
     }
 
     #[test]
@@ -429,17 +514,26 @@ mod tests {
     fn sig_id_leading_zeros_removed() {
         // HNSHK v4: profile, function, control ref, area, role, SecIdnDetails, sig ID (DEG 7)
         assert_eq!(
-            run(&SigIdLeadingZero, "HNSHK:2:4+PIN:1+999+1234567+1+1+2::SYS+0042+1:20260101:120000'"),
+            run(
+                &SigIdLeadingZero,
+                "HNSHK:2:4+PIN:1+999+1234567+1+1+2::SYS+0042+1:20260101:120000'"
+            ),
             "HNSHK:2:4+PIN:1+999+1234567+1+1+2::SYS+42+1:20260101:120000'"
         );
         // HNSHK v3 (HBCI 2.2): sig ID is DEG 6, as in the Java original.
-        assert_eq!(run(&SigIdLeadingZero, "HNSHK:2:3+999+1234567+1+1+2::SYS+000+X'"), "HNSHK:2:3+999+1234567+1+1+2::SYS+0+X'");
+        assert_eq!(
+            run(&SigIdLeadingZero, "HNSHK:2:3+999+1234567+1+1+2::SYS+000+X'"),
+            "HNSHK:2:3+999+1234567+1+1+2::SYS+0+X'"
+        );
     }
 
     #[test]
     fn invalid_supp_hbci_version_fixed() {
         assert_eq!(
-            run(&InvalidSuppHbciVersion, "HIBPA:5:3:4+12+280:10020030+Bank+0+1+2:3:300+0'"),
+            run(
+                &InvalidSuppHbciVersion,
+                "HIBPA:5:3:4+12+280:10020030+Bank+0+1+2:3:300+0'"
+            ),
             "HIBPA:5:3:4+12+280:10020030+Bank+0+1+210:300:300+0'"
         );
     }
@@ -447,15 +541,31 @@ mod tests {
     #[test]
     fn sec_type_tan_removed_from_hishv() {
         // More than one method: drop only TAN:1.
-        assert_eq!(run(&SecTypeTan, "HISHV:6:3:4+N+RDH:3+TAN:1+PIN:1'X:7:1'"), "HISHV:6:3:4+N+RDH:3+PIN:1'X:7:1'");
+        assert_eq!(
+            run(&SecTypeTan, "HISHV:6:3:4+N+RDH:3+TAN:1+PIN:1'X:7:1'"),
+            "HISHV:6:3:4+N+RDH:3+PIN:1'X:7:1'"
+        );
         // Only TAN: drop the whole segment.
-        assert_eq!(run(&SecTypeTan, "A:1:1'HISHV:6:3:4+N+TAN:1'X:7:1'"), "A:1:1'X:7:1'");
+        assert_eq!(
+            run(&SecTypeTan, "A:1:1'HISHV:6:3:4+N+TAN:1'X:7:1'"),
+            "A:1:1'X:7:1'"
+        );
     }
 
     #[test]
     fn quirks_never_panic_on_garbage() {
         let chain = crate::quirks::QuirkChain::hbci4java();
-        for msg in [&b""[..], b"'", b"HNHBK", b"HNHBK:1:3+'", b"HNSHK:2:4+0'", b"HIBPA:'", b"HISHV:1:3+N+TAN'", b"@9@", b"HNHBK:1:3+@99999@'"] {
+        for msg in [
+            &b""[..],
+            b"'",
+            b"HNHBK",
+            b"HNHBK:1:3+'",
+            b"HNSHK:2:4+0'",
+            b"HIBPA:'",
+            b"HISHV:1:3+N+TAN'",
+            b"@9@",
+            b"HNHBK:1:3+@99999@'",
+        ] {
             let _ = chain.incoming(msg, &CTX);
         }
     }

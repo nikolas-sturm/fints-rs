@@ -46,7 +46,10 @@ fn fields(text: &str) -> Vec<Field<'_>> {
         let line = line.trim_end_matches('\r');
         if let Some(rest) = line.strip_prefix(':') {
             if let Some((tag, value)) = rest.split_once(':') {
-                out.push(Field { tag, value: value.to_string() });
+                out.push(Field {
+                    tag,
+                    value: value.to_string(),
+                });
                 continue;
             }
         }
@@ -86,7 +89,10 @@ fn currency_amount(s: &str) -> Option<(String, Decimal)> {
         Some(r) if r.len() > 3 && r[..3].bytes().all(|b| b.is_ascii_uppercase()) => (true, r),
         _ => (false, s),
     };
-    if rest.len() < 4 || !rest.is_char_boundary(3) || !rest[..3].bytes().all(|b| b.is_ascii_uppercase()) {
+    if rest.len() < 4
+        || !rest.is_char_boundary(3)
+        || !rest[..3].bytes().all(|b| b.is_ascii_uppercase())
+    {
         return None;
     }
     let v = amount(&rest[3..])?;
@@ -186,7 +192,8 @@ impl Position {
                         if let Some(rest) = line.trim().strip_prefix('2') {
                             let mut parts = rest.split('+');
                             self.acquisition_price = parts.next().and_then(amount);
-                            self.acquisition_currency = parts.next().filter(|c| c.len() == 3).map(str::to_string);
+                            self.acquisition_currency =
+                                parts.next().filter(|c| c.len() == 3).map(str::to_string);
                         }
                     }
                 }
@@ -202,7 +209,11 @@ impl Position {
         let quantity = self.quantity.unwrap_or(Decimal::ZERO);
         // Percent prices (bonds) apply to the face amount.
         let value_of = |price: Decimal| {
-            if self.price_is_percent { quantity * price / Decimal::from(100) } else { quantity * price }
+            if self.price_is_percent {
+                quantity * price / Decimal::from(100)
+            } else {
+                quantity * price
+            }
         };
         let (market_value, market_value_currency) = match &self.market_value {
             Some((cur, v)) => (Some(*v), Some(cur.clone())),
@@ -239,7 +250,10 @@ impl Position {
             name,
             quantity,
             price: self.price,
-            price_currency: self.price_currency.or_else(|| self.acquisition_currency.clone()).map(Currency::new),
+            price_currency: self
+                .price_currency
+                .or_else(|| self.acquisition_currency.clone())
+                .map(Currency::new),
             price_date: self.price_date,
             market_value,
             market_value_currency: market_value_currency.map(Currency::new),
@@ -266,7 +280,10 @@ pub(crate) fn parse_mt535(data: &[u8]) -> Vec<SecurityHolding> {
         match (f.tag, f.value.as_str()) {
             ("16R", "FIN") => current = Some(Position::default()),
             ("16S", "FIN") => {
-                if let Some(h) = current.take().and_then(|p| p.into_holding(depot_id.as_deref())) {
+                if let Some(h) = current
+                    .take()
+                    .and_then(|p| p.into_holding(depot_id.as_deref()))
+                {
                     holdings.push(h);
                 }
             }
@@ -362,7 +379,10 @@ BUNDESREP.DEUTSCHLAND ANL.V.2022\r\n\
         let etf = &parse_mt535(STATEMENT.as_bytes())[1];
         assert_eq!(etf.quantity, Decimal::from_str("16.8211").unwrap());
         assert_eq!(etf.price_date, NaiveDate::from_ymd_opt(2026, 3, 14));
-        assert_eq!(etf.market_value, Some(Decimal::from_str("16.8211").unwrap() * Decimal::from_str("98.765").unwrap()));
+        assert_eq!(
+            etf.market_value,
+            Some(Decimal::from_str("16.8211").unwrap() * Decimal::from_str("98.765").unwrap())
+        );
         assert_eq!(etf.wkn.as_ref().unwrap().as_str(), "A0RPWH");
     }
 
@@ -373,7 +393,10 @@ BUNDESREP.DEUTSCHLAND ANL.V.2022\r\n\
         assert!(bond.wkn.is_none());
         assert_eq!(bond.quantity, Decimal::from(5000));
         assert_eq!(bond.price, Some(Decimal::from_str("101.25").unwrap()));
-        assert_eq!(bond.market_value, Some(Decimal::from_str("5062.5").unwrap()));
+        assert_eq!(
+            bond.market_value,
+            Some(Decimal::from_str("5062.5").unwrap())
+        );
         assert_eq!(bond.raw["quantity_type"], "FAMT");
     }
 
@@ -386,13 +409,19 @@ BUNDESREP.DEUTSCHLAND ANL.V.2022\r\n\
         let h = parse_mt535(s.as_bytes());
         assert_eq!(h.len(), 1);
         assert_eq!(h[0].name, "COMS.-MSCI EM.M.T.U.ETF I");
-        assert_eq!(h[0].market_value, Some(Decimal::from_str("970.17").unwrap()));
+        assert_eq!(
+            h[0].market_value,
+            Some(Decimal::from_str("970.17").unwrap())
+        );
         assert_eq!(h[0].raw["acquisition_price"], "3.968293");
     }
 
     #[test]
     fn negative_amounts_and_empty_depot() {
-        assert_eq!(currency_amount("NEUR12,5"), Some(("EUR".into(), Decimal::from_str("-12.5").unwrap())));
+        assert_eq!(
+            currency_amount("NEUR12,5"),
+            Some(("EUR".into(), Decimal::from_str("-12.5").unwrap()))
+        );
         assert_eq!(amount("N3,"), Some(Decimal::from(-3)));
         let empty = ":16R:GENL\r\n:97A::SAFE//50010517/1\r\n:17B::ACTI//N\r\n:16S:GENL\r\n-";
         assert!(parse_mt535(empty.as_bytes()).is_empty());
@@ -400,7 +429,16 @@ BUNDESREP.DEUTSCHLAND ANL.V.2022\r\n\
 
     #[test]
     fn garbage_does_not_panic() {
-        for s in ["", ":", ":16R:FIN", ":16R:FIN\n:35B:\n:16S:FIN", ":19A::HOLD//€€€", ":90B::MRKT//ACTU/E", ":93B::AGGR//", "\u{fffd}:70E::HOLD//2"] {
+        for s in [
+            "",
+            ":",
+            ":16R:FIN",
+            ":16R:FIN\n:35B:\n:16S:FIN",
+            ":19A::HOLD//€€€",
+            ":90B::MRKT//ACTU/E",
+            ":93B::AGGR//",
+            "\u{fffd}:70E::HOLD//2",
+        ] {
             let _ = parse_mt535(s.as_bytes());
         }
     }

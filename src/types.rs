@@ -103,7 +103,10 @@ impl HhdUcData {
 
     fn decode_matrix(b: &[u8]) -> Option<TanMedia> {
         let be16 = |at: usize| -> Option<usize> {
-            Some(usize::from(u16::from_be_bytes([*b.get(at)?, *b.get(at + 1)?])))
+            Some(usize::from(u16::from_be_bytes([
+                *b.get(at)?,
+                *b.get(at + 1)?,
+            ])))
         };
         let mime_len = be16(0)?;
         let mime = b.get(2..2 + mime_len)?;
@@ -300,7 +303,11 @@ impl ResponseCodeKind {
             "3072" => Self::UserDataChanged {
                 user_id: parameters.first().filter(|s| !s.is_empty()).cloned(),
                 // Like hbci4java: customer ID defaults to the user ID.
-                customer_id: parameters.get(1).or(parameters.first()).filter(|s| !s.is_empty()).cloned(),
+                customer_id: parameters
+                    .get(1)
+                    .or(parameters.first())
+                    .filter(|s| !s.is_empty())
+                    .cloned(),
             },
             "3076" => Self::ScaExemption,
             "3091" => Self::VopNotRequired,
@@ -822,7 +829,10 @@ mod tests {
         raw.extend_from_slice(&png);
         assert_eq!(
             HhdUcData(raw).decode(),
-            Some(TanMedia::Image { mime_type: "image/png".into(), data: png.to_vec() })
+            Some(TanMedia::Image {
+                mime_type: "image/png".into(),
+                data: png.to_vec()
+            })
         );
     }
 
@@ -831,7 +841,9 @@ mod tests {
         let raw = b"0388A01239230520422070812345678904".to_vec();
         assert_eq!(
             HhdUcData(raw).decode(),
-            Some(TanMedia::Flicker("0388A01239230520422070812345678904".into()))
+            Some(TanMedia::Flicker(
+                "0388A01239230520422070812345678904".into()
+            ))
         );
     }
 
@@ -847,10 +859,22 @@ mod tests {
 
     #[test]
     fn account_classes() {
-        assert_eq!(AccountClass::from_account_type(1), Some(AccountClass::Checking));
-        assert_eq!(AccountClass::from_account_type(10), Some(AccountClass::Savings));
-        assert_eq!(AccountClass::from_account_type(39), Some(AccountClass::Depot));
-        assert_eq!(AccountClass::from_account_type(55), Some(AccountClass::CreditCard));
+        assert_eq!(
+            AccountClass::from_account_type(1),
+            Some(AccountClass::Checking)
+        );
+        assert_eq!(
+            AccountClass::from_account_type(10),
+            Some(AccountClass::Savings)
+        );
+        assert_eq!(
+            AccountClass::from_account_type(39),
+            Some(AccountClass::Depot)
+        );
+        assert_eq!(
+            AccountClass::from_account_type(55),
+            Some(AccountClass::CreditCard)
+        );
         assert_eq!(AccountClass::from_account_type(0), None);
         assert_eq!(AccountClass::from_account_type(100), None);
     }
